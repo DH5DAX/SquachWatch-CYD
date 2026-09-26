@@ -1351,15 +1351,39 @@ The amateur licence adds nothing there. The limits are:
 - **Storage:** a capture partition in the unused 7.4 MB of flash, written in
   batches.
 
-**Screens** (at the 400×240 logical canvas):
+**Screens** — as built, on the 400×240 logical canvas. Ten views on one
+screen, reached by `[ VIEWS ]` in the button bar, which opens a 3×3 grid with a
+live figure under each name; `[ SURVEY ]` is on the bar of every view because
+it is the one used away from a desk.
 
-| Screen | Shows |
+| View | Shows |
 |---|---|
-| LORA | the live packet list, each row with a protocol colour chip |
-| PACKET | raw bytes and decoded fields |
-| NODES | per-network node tables |
-| CHANNEL | utilisation, airtime per node against the limit, SF histogram, noise floor |
-| SPECTRUM | the waterfall |
+| LIST | every frame newest first, one line each, a protocol colour chip at the left; a tap opens PACKET |
+| ADVERTS | the same ring filtered to MeshCore adverts, one row each with the name, role, locator and whether it was heard direct. Not a second store: `MeshCore::parse` over the bytes is the whole filter |
+| PACKET | one frame: the radio fields, the decoded line, the bytes |
+| NODES | one row per transmitter, with the signal column marked `v` when the only copies came off a relay |
+| TRAFFIC | frames a minute and occupancy of the *listening* time, plus both as a graph over the last 2 min 48 s. The view keeps its own 84 buckets; `Lora::Stats` holds totals and no history |
+| CHANS | the keys the decoders hold, what each has opened and how much of it is readable; a tap opens CHANMSG |
+| CHANMSG | what came through one key — sender (claimed, unsigned), text, age, signal, `via` when the copy came off a relay — or every channel at once. MUTE lives here |
+| SURVEY | the antenna test, live: only stations heard first-hand, each with a 24-px RSSI, a 64-reading trend drawn as columns, and one 392×28 START/STOP button |
+| SURVEYCMP | two runs against each other: the verdict, the sentence saying what it rests on, and the paired per-node deltas as bars |
+| STATS | the radio channel: counters, airtime, noise, lookups, the busiest profiles, and the SWEEP spectrum |
+
+**Touch targets.** List rows are `fontHeight() + 12` = 20 logical px, which on
+this panel is 7.62 mm — Android's 48 dp floor — against the 14 px (5.33 mm)
+they were, which is what made the channel list impossible to hit with a finger.
+Thirteen rows became nine. See the pixel-pitch row in
+[CROWPANEL7.md](CROWPANEL7.md).
+
+**The antenna survey**, which is the point of the two survey views: START,
+walk, STOP; swap the antenna; START, walk, STOP; then CMP. The measurement is
+the *same node compared against itself across two runs* — an absolute RSSI
+carries the other station's power, antenna and distance, so a mean over
+whatever happened to transmit measures the traffic and not the connector.
+`include/lora_survey.h` has the full reasoning, including why the verdict never
+trades "one more neighbour" against "n dB" and why the trend's scale has a
+10 dB floor. Runs are labelled from the console (`LORA SURVEY LABEL <text>`):
+the panel has no keyboard and says so rather than pretending.
 
 DEX cards for the protocol types, and alerts only for `LORA_TRACKER`.
 

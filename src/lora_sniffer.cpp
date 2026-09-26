@@ -19,6 +19,8 @@
 #include "lora_nodes.h"
 #include "lora_meshtastic.h"
 #include "lora_channels.h"
+#include "lora_survey.h"
+#include "lora_msgs.h"
 #include "lora_enrich.h"
 #include "lora_feed.h"
 #include "lora_ident.h"
@@ -311,6 +313,30 @@ bool begin() {
     }
     if (!s_ring) s_cap = 0;
 
+    // The antenna survey's runs and the decoded-message ring, both in PSRAM and
+    // both handed their block from here, because they are the two largest things
+    // this firmware keeps outside the frame buffer and contiguous internal RAM
+    // on this board measures about 57 kB (crowpanel7-probe reports it).
+    //
+    // No internal-RAM fallback, unlike the packet ring above: the ring is what
+    // makes the LORA screen work at all, while these two are field features. A
+    // board with no PSRAM gets a sniffer that simply has no survey and no
+    // message history, which is better than one that spends its last contiguous
+    // block on them and then cannot rotate the CLEAR screen.
+    size_t surveyBytes = 0, msgBytes = 0;
+    {
+        const size_t want = Survey::bytesNeeded();
+        void* mem = heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
+        if (mem && Survey::begin(mem, want)) surveyBytes = want;
+        else if (mem)                        free(mem);
+    }
+    {
+        const size_t want = Msgs::bytesNeeded();
+        void* mem = heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
+        if (mem && Msgs::begin(mem, want)) msgBytes = want;
+        else if (mem)                      free(mem);
+    }
+
     // The survey's default: everything in the module's own band. The 433
     // rows are one command away for whoever wants to know what leaks in.
     uint64_t mask = 0;
@@ -333,6 +359,15 @@ bool begin() {
                   s_up.tcxoDeci ? "on" : "off (crystal)", (unsigned)s_cap,
                   s_cap > 64 ? "PSRAM" : "internal RAM",
                   (unsigned)chans, chans == 1 ? "" : "s");
+    // Said out loud rather than assumed: a field feature that silently is not
+    // there is worse than one that says so at boot.
+    if (surveyBytes && msgBytes)
+        Serial.printf("[lora] survey: %u runs x %u nodes in %u kB PSRAM; %u messages in %u kB\n",
+                      (unsigned)Survey::RUNS, (unsigned)Survey::RUN_NODES, (unsigned)(surveyBytes / 1024),
+                      (unsigned)Msgs::CAP, (unsigned)(msgBytes / 1024));
+    else
+        Serial.printf("[lora] no PSRAM for the survey%s or the message ring%s -- both are off\n",
+                      surveyBytes ? " (it has its block)" : "", msgBytes ? " (it has its block)" : "");
     xTaskCreatePinnedToCore(task, "lora", 6144, nullptr, 2, &s_task, 0);
     return true;
 }
@@ -470,7 +505,117 @@ bool packetAt(uint16_t idx, Packet& out) {
     return ok;
 }
 
+// One acquisition for a whole page. See the header for why both new views want
+// this rather than a packetAt per row.
+uint16_t packetSnapshot(Packet* out, uint16_t cap, uint16_t from) {
+    if (!out || !cap || !s_ring || !s_lock) return 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    uint16_t w = 0;
+    for (uint16_t i = from; i < s_count && w < cap; i++) {
+        const uint16_t slot = (uint16_t)((s_head + s_cap - 1 - i) % s_cap);
+        memcpy(&out[w++], &s_ring[slot], sizeof out[0]);
+    }
+    xSemaphoreGive(s_lock);
+    return w;
+}
+
 const Stats& stats() { return s_stats; }
+
+// ---- the antenna survey and the message ring, under the same lock ----------
+// Both are fed from Nodes::note(), which runs on the radio task inside this
+// mutex (see push()), so every read from loop() has to hold it too. The bodies
+// are one call each: the measurement itself is in lora_survey.cpp, where a
+// desktop can test it.
+int8_t surveyStart(const char* label) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return -1;
+    // The radio's own state travels into the run: which profile it is parked on,
+    // and whether it is walking them instead, which is what makes two runs
+    // incomparable (include/lora_survey.h, Run::hopping).
+    const int8_t r = Survey::start(label, s_current, s_mode == Mode::SURVEY, millis());
+    xSemaphoreGive(s_lock);
+    return r;
+}
+bool surveyStop() {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    const bool ok = Survey::stop(millis());
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+bool surveyLabel(const char* label) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    const bool ok = Survey::label(label);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+int8_t  surveyRecording() { return Survey::recording(); }
+uint8_t surveyRunCount()  { return Survey::runCount(); }
+bool surveyRun(uint8_t i, Survey::Run& out) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) { memset(&out, 0, sizeof out); return false; }
+    const bool ok = Survey::run(i, out);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+uint8_t surveyRunNodes(uint8_t run, Survey::NodeStats* out, uint8_t cap, uint8_t from) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    const uint8_t n = Survey::runNodes(run, out, cap, from);
+    xSemaphoreGive(s_lock);
+    return n;
+}
+bool surveyRunNode(uint8_t run, Proto p, uint64_t id, Survey::NodeStats& out) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) { out = Survey::NodeStats(); return false; }
+    const bool ok = Survey::runNode(run, p, id, out);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+bool surveyCompare(uint8_t a, uint8_t b, Survey::Compare& out) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE) { memset(&out, 0, sizeof out); return false; }
+    const bool ok = Survey::compare(a, b, out);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+uint8_t surveyPairs(uint8_t a, uint8_t b, Survey::Pair* out, uint8_t cap, uint8_t from) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE) return 0;
+    const uint8_t n = Survey::pairs(a, b, out, cap, from);
+    xSemaphoreGive(s_lock);
+    return n;
+}
+uint8_t surveyTrend(Proto p, uint64_t id, Survey::Sample* out, uint8_t cap) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    const uint8_t n = Survey::trend(p, id, out, cap);
+    xSemaphoreGive(s_lock);
+    return n;
+}
+// No lock on either of these: they read nothing the radio task writes -- the
+// Compare is the caller's own copy, already taken under the lock by
+// surveyCompare. See include/lora_sniffer.h for why they are here at all.
+const char* surveyVerdictText(Survey::Verdict v) { return Survey::verdictText(v); }
+void surveyVerdictLine(const Survey::Compare& c, char* out, size_t cap) { Survey::verdictLine(c, out, cap); }
+void surveyClear() {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return;
+    Survey::clear();
+    xSemaphoreGive(s_lock);
+}
+
+uint16_t msgCount()   { return Msgs::count(); }
+uint32_t msgDropped() { return Msgs::dropped(); }
+bool msgAt(uint16_t i, Msgs::Msg& out) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) { memset(&out, 0, sizeof out); return false; }
+    const bool ok = Msgs::at(i, out);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+uint16_t msgCountFor(Proto p, uint8_t chan) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    const uint16_t n = Msgs::countFor(p, chan);
+    xSemaphoreGive(s_lock);
+    return n;
+}
+uint16_t msgPageFor(Proto p, uint8_t chan, Msgs::Msg* out, uint16_t cap, uint16_t from) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    const uint16_t n = Msgs::pageFor(p, chan, out, cap, from);
+    xSemaphoreGive(s_lock);
+    return n;
+}
 
 uint8_t nodeCount() { return Nodes::count(); }
 uint8_t nodeOrder(uint8_t* idx, uint8_t cap) {
@@ -581,6 +726,14 @@ bool channelRow(uint8_t row, ChannelRow& out) {
         out.derived = false;
         out.keyBits = (uint16_t)(c.keyLen * 8);
     }
+    return true;
+}
+
+bool channelRowKey(uint8_t row, Proto& proto, uint8_t& idx) {
+    bool isMc = false; uint8_t i = 0;
+    if (!rowAt(row, isMc, i)) return false;
+    proto = isMc ? Proto::MESHCORE : Proto::MESHTASTIC;
+    idx = i;
     return true;
 }
 
@@ -881,6 +1034,302 @@ static void feedConsole() {
     Serial.println("[lora] measured on 200 live rows, such a name is wrong 27-77 % of the time.");
 }
 
+// ---- LORA SURVEY: the antenna test, on the console -------------------------
+// The console first, the way the rest of this firmware works: a sysop at 115200
+// baud can read the numbers off a serial line while the views are still being
+// drawn, and the antenna is swapped with two hands at a bench where the panel is
+// face down. include/lora_survey.h is where the measurement is explained; this
+// prints it and adds nothing.
+//
+// THE WORD COLLIDES, ON PURPOSE AND CAREFULLY. `LORA SURVEY` on its own has
+// always switched the radio to Mode::SURVEY -- walking the profiles -- and it
+// still does. Every antenna command takes a second word, and the bare form now
+// points at them. The two are unrelated, and Mode::SURVEY is in fact the mode an
+// antenna run must NOT be taken in, which is why a run records whether the radio
+// was hopping and a comparison refuses a hopping run against a parked one.
+
+// A duration in the form a person reads at a bench.
+static void surveySpan(uint32_t ms, char* out, size_t cap) {
+    const uint32_t s = ms / 1000;
+    if (s < 120) snprintf(out, cap, "%lus", (unsigned long)s);
+    else         snprintf(out, cap, "%lum%02lus", (unsigned long)(s / 60), (unsigned long)(s % 60));
+}
+
+// snr4 is quarter-dB in an int8: C++ truncates toward zero, so -3 quarters would
+// print as "0.75" with the sign lost. Sign off first, magnitude on its own.
+static void snr4Text(int32_t q, char* out, size_t cap) {
+    const char     sgn = q < 0 ? '-' : '+';
+    const uint32_t mag = (uint32_t)(q < 0 ? -q : q);
+    snprintf(out, cap, "%c%lu.%02lu", sgn, (unsigned long)(mag / 4), (unsigned long)((mag % 4) * 25));
+}
+
+// The name for a survey row. A node heard exactly once has no tag yet -- every
+// decoder sets it after the frame is counted -- so the id in hex stands in
+// rather than an empty column.
+static void surveyName(Proto p, uint64_t id, const char* tag, char* out, size_t cap) {
+    if (tag && tag[0]) { snprintf(out, cap, "%s", tag); return; }
+    snprintf(out, cap, "%s:%08lx", protoShort(p), (unsigned long)(id & 0xFFFFFFFFu));
+}
+
+static void surveyPrintRun(uint8_t i, const Survey::Run& r, uint32_t now) {
+    char span[16];
+    surveySpan((r.stopMs ? r.stopMs : now) - r.startMs, span, sizeof span);
+    Serial.printf("[lora] %u %c \"%-22s\" %-8s %4lu frames  %2u nodes%s%s%s\n",
+                  (unsigned)(i + 1), Survey::recording() == (int8_t)i ? '*' : ' ', r.label, span,
+                  (unsigned long)r.frames, (unsigned)r.nodes,
+                  r.framesDropped ? "  (frames it had no row for)" : "",
+                  r.hopping ? "  HOPPING" : "",
+                  r.stopMs ? "" : "  recording");
+}
+
+static void surveyPrintNode(const Survey::NodeStats& n, uint32_t startMs) {
+    char who[20], lo[10], med[10], hi[10], t0[12], t1[12];
+    surveyName(n.proto, n.id, n.tag, who, sizeof who);
+    snr4Text(n.snrMin4, lo, sizeof lo);
+    snr4Text(n.snrMed4, med, sizeof med);
+    snr4Text(n.snrMax4, hi, sizeof hi);
+    surveySpan(n.firstMs - startMs, t0, sizeof t0);
+    surveySpan(n.lastMs - startMs, t1, sizeof t1);
+    // The evidence first, then the numbers, and the words for when there is not
+    // enough of it: a median over one frame is a reading, and printing it beside
+    // a median over forty without saying so is the lie this feature exists to
+    // avoid.
+    Serial.printf("[lora]   %-18s %3u frame%s  rssi %4d /%4d /%4d dBm  snr %s /%s /%s  %s..%s%s%s\n",
+                  who, (unsigned)n.frames, n.frames == 1 ? " " : "s",
+                  (int)n.rssiMin, (int)n.rssiMed, (int)n.rssiMax, lo, med, hi, t0, t1,
+                  n.enough ? "" : "  << NOT A MEASUREMENT",
+                  n.outOfRange ? "  << readings out of range: driver fault" : "");
+}
+
+// The trend as one line of characters, scaled to that node's own span. The span
+// is printed beside it, because a ramp with no scale under it says "it went up"
+// and nothing about by how much -- and over a 2 dB span it would say that about
+// noise.
+static void surveyPrintTrend(const Survey::Sample* s, uint8_t n) {
+    static const char RAMP[] = "_.-~=+*#";   // eight steps
+    if (!n) { Serial.println("[lora]        no readings yet"); return; }
+    int16_t lo = s[0].rssi, hi = s[0].rssi;
+    for (uint8_t i = 1; i < n; i++) { if (s[i].rssi < lo) lo = s[i].rssi; if (s[i].rssi > hi) hi = s[i].rssi; }
+    char line[Survey::TREND_LEN + 1];
+    const int span = hi - lo;
+    for (uint8_t i = 0; i < n; i++)
+        line[i] = span > 0 ? RAMP[((s[i].rssi - lo) * 7) / span] : RAMP[3];
+    line[n] = '\0';
+    Serial.printf("[lora]        %s   %d..%d dBm over %u reading%s\n", line, (int)lo, (int)hi,
+                  (unsigned)n, n == 1 ? "" : "s");
+}
+
+static void surveyHelp() {
+    Serial.println("[lora] LORA SURVEY START [label] | LABEL <text> | STOP | LIST | SHOW <n> | CMP <a> <b> | LIVE | CLEAR");
+    Serial.println("[lora] the antenna test. Park the radio first (LORA FOCUS <n>): a hopping radio hears each");
+    Serial.println("[lora] network only part of the time, and two runs that hopped differently are not comparable.");
+    Serial.println("[lora] one run per antenna or per spot, then CMP: the measurement is the SAME node compared");
+    Serial.println("[lora] against itself across two runs, because an absolute RSSI carries the other station's");
+    Serial.println("[lora] power and distance and says nothing about what is on your connector.");
+    Serial.println("[lora] bare LORA SURVEY is the radio's profile-walking mode and a different thing entirely.");
+}
+
+static bool surveyConsole(const char* rest) {
+    while (*rest == ' ') rest++;
+    const uint32_t now = millis();
+
+    if (strncasecmp(rest, "START", 5) == 0) {
+        const char* lab = rest + 5;
+        while (*lab == ' ') lab++;
+        const int8_t r = surveyStart(lab);
+        if (r < 0) { Serial.println("[lora] no survey store -- there was no PSRAM for it at boot"); return true; }
+        Survey::Run run;
+        surveyRun((uint8_t)r, run);
+        Serial.printf("[lora] run %u recording: \"%s\" on profile %u %s\n", (unsigned)(r + 1), run.label,
+                      (unsigned)run.profile, profile(run.profile).name);
+        if (run.hopping)
+            Serial.println("[lora] the radio is HOPPING profiles -- park it with LORA FOCUS <n> and start again.");
+        Serial.println("[lora] only nodes heard DIRECTLY are counted. LORA SURVEY STOP when the antenna comes off.");
+        return true;
+    }
+    if (strncasecmp(rest, "LABEL", 5) == 0) {
+        const char* lab = rest + 5;
+        while (*lab == ' ') lab++;
+        if (!surveyLabel(lab)) { Serial.println("[lora] nothing is recording, or no text given"); return true; }
+        Serial.printf("[lora] recording run is now \"%s\"\n", lab);
+        return true;
+    }
+    if (strcasecmp(rest, "STOP") == 0) {
+        const int8_t r = surveyRecording();
+        if (!surveyStop()) { Serial.println("[lora] nothing was recording"); return true; }
+        Survey::Run run;
+        surveyRun((uint8_t)r, run);
+        surveyPrintRun((uint8_t)r, run, now);
+        if (run.frames < Survey::EVIDENCE_MIN)
+            Serial.printf("[lora] %lu frame%s in the whole run: that is not a measurement. Listen longer.\n",
+                          (unsigned long)run.frames, run.frames == 1 ? "" : "s");
+        return true;
+    }
+    if (strcasecmp(rest, "LIST") == 0 || !*rest) {
+        if (!surveyRunCount()) { Serial.println("[lora] no runs. LORA SURVEY START <label> begins one"); return true; }
+        for (uint8_t i = 0; i < Survey::RUNS; i++) {
+            Survey::Run r;
+            if (surveyRun(i, r)) surveyPrintRun(i, r, now);
+        }
+        Serial.printf("[lora] %u of %u slots used; CMP <a> <b> is the measurement\n",
+                      (unsigned)surveyRunCount(), (unsigned)Survey::RUNS);
+        return true;
+    }
+    if (strncasecmp(rest, "SHOW", 4) == 0) {
+        const int n = atoi(rest + 4);
+        Survey::Run r;
+        if (n < 1 || n > (int)Survey::RUNS || !surveyRun((uint8_t)(n - 1), r)) {
+            Serial.println("[lora] LORA SURVEY SHOW <n> -- see LORA SURVEY LIST");
+            return true;
+        }
+        surveyPrintRun((uint8_t)(n - 1), r, now);
+        Survey::NodeStats rows[8];
+        uint8_t from = 0, got = 0;
+        do {
+            got = surveyRunNodes((uint8_t)(n - 1), rows, (uint8_t)(sizeof rows / sizeof rows[0]), from);
+            for (uint8_t i = 0; i < got; i++) surveyPrintNode(rows[i], r.startMs);
+            from = (uint8_t)(from + got);
+        } while (got == (uint8_t)(sizeof rows / sizeof rows[0]));
+        if (!from) Serial.println("[lora]   nothing heard directly in this run");
+        Serial.printf("[lora] a row needs %u frames before its median is a figure at all\n",
+                      (unsigned)Survey::EVIDENCE_MIN);
+        return true;
+    }
+    if (strncasecmp(rest, "CMP", 3) == 0) {
+        int a = 0, b = 0;
+        if (sscanf(rest + 3, "%d %d", &a, &b) != 2) { Serial.println("[lora] LORA SURVEY CMP <a> <b>"); return true; }
+        Survey::Compare c;
+        if (!surveyCompare((uint8_t)(a - 1), (uint8_t)(b - 1), c)) {
+            Serial.println("[lora] no such pair of runs -- see LORA SURVEY LIST");
+            return true;
+        }
+        Survey::Run ra, rb;
+        surveyRun((uint8_t)(a - 1), ra);
+        surveyRun((uint8_t)(b - 1), rb);
+        char sa[16], sb[16];
+        surveySpan((ra.stopMs ? ra.stopMs : now) - ra.startMs, sa, sizeof sa);
+        surveySpan((rb.stopMs ? rb.stopMs : now) - rb.startMs, sb, sizeof sb);
+        Serial.printf("[lora] A = %u \"%s\" %s %lu frames    B = %u \"%s\" %s %lu frames\n",
+                      (unsigned)a, ra.label, sa, (unsigned long)ra.frames,
+                      (unsigned)b, rb.label, sb, (unsigned long)rb.frames);
+        char words[200];
+        Survey::verdictLine(c, words, sizeof words);
+        Serial.printf("[lora] %-12s %s\n", Survey::verdictText(c.verdict), words);
+        Survey::Pair pr[8];
+        uint8_t from = 0, got = 0;
+        do {
+            got = surveyPairs((uint8_t)(a - 1), (uint8_t)(b - 1), pr, (uint8_t)(sizeof pr / sizeof pr[0]), from);
+            for (uint8_t i = 0; i < got; i++) {
+                char who[20], ds[10];
+                surveyName(pr[i].proto, pr[i].id, pr[i].tag, who, sizeof who);
+                snr4Text(pr[i].dSnr4, ds, sizeof ds);
+                Serial.printf("[lora]   %-18s %+4d dB  snr %s dB   %3u frames A / %3u B%s\n",
+                              who, (int)pr[i].dRssi, ds,
+                              (unsigned)pr[i].framesA, (unsigned)pr[i].framesB,
+                              pr[i].enough ? "" : "   << thin, not counted");
+            }
+            from = (uint8_t)(from + got);
+        } while (got == (uint8_t)(sizeof pr / sizeof pr[0]));
+        if (c.thin)
+            Serial.printf("[lora] %u node%s in both runs but under %u frames on one side: shown, not counted\n",
+                          (unsigned)c.thin, c.thin == 1 ? "" : "s", (unsigned)Survey::EVIDENCE_MIN);
+        Serial.println("[lora] the dB figure is RSSI: it is the half of the link the antenna changes, and in a");
+        Serial.println("[lora] paired comparison the node's own power and distance cancel out. SNR is beside it");
+        Serial.println("[lora] because it decides whether a frame decodes at all -- so gained/lost IS an SNR result.");
+        return true;
+    }
+    if (strcasecmp(rest, "LIVE") == 0) {
+        // Only the rows heard directly, which is the whole point: the handful of
+        // stations around this antenna, each with its own line.
+        // One row at a time and therefore one lock acquisition per row, which a
+        // VIEW must not do (that is what nodeSnapshot and packetSnapshot exist
+        // for) and a console command may: it is typed by hand, it runs once, and
+        // nothing is waiting on the next frame. The point of doing it that way
+        // here is that it needs no buffer held for ever -- 96 indices, one row
+        // and one trend on the stack, 728 bytes, and nothing in internal RAM
+        // between invocations.
+        uint8_t idx[Nodes::CAP];
+        const uint8_t n = nodeOrder(idx, (uint8_t)Nodes::CAP);
+        uint8_t shown = 0;
+        for (uint8_t i = 0; i < n; i++) {
+            Nodes::Node nd;
+            if (!nodeAt(idx[i], nd)) continue;
+            if (!nd.directPackets) continue;
+            char who[20], snr[10];
+            surveyName(nd.proto, nd.id, nd.tag, who, sizeof who);
+            snr4Text(nd.snr4, snr, sizeof snr);
+            Serial.printf("[lora] %-18s %4d dBm  snr %s dB  %3u direct  %lus ago  %s\n",
+                          who, (int)nd.rssi, snr, (unsigned)nd.directPackets,
+                          (unsigned long)((now - nd.lastMs) / 1000),
+                          nd.name[0] ? nd.name : "");
+            Survey::Sample tr[Survey::TREND_LEN];
+            surveyPrintTrend(tr, surveyTrend(nd.proto, nd.id, tr, (uint8_t)Survey::TREND_LEN));
+            shown++;
+        }
+        if (!shown) {
+            Serial.println("[lora] nothing heard directly yet. Every row the NODES view shows with a v is a");
+            Serial.println("[lora] relayed copy: that signal is the last repeater's link to here, not the node's.");
+        }
+        return true;
+    }
+    if (strcasecmp(rest, "CLEAR") == 0) { surveyClear(); Serial.println("[lora] every run and the live trend gone"); return true; }
+    surveyHelp();
+    return true;
+}
+
+// ---- LORA MSGS: what came through the keys ---------------------------------
+// The counters in LORA CHAN say how many frames each key opened. This says what
+// they said. include/lora_msgs.h for what is kept and what is not -- a GRP_DATA
+// opened and is not text, and a channel with no key opened nothing.
+static bool msgsConsole(const char* rest) {
+    while (*rest == ' ') rest++;
+    const uint32_t now = millis();
+    const bool byRow = *rest != '\0';
+    Proto want = Proto::UNKNOWN;
+    uint8_t wantIdx = 0;
+    if (byRow) {
+        const int row = atoi(rest);
+        ChannelRow cr;
+        if (row < 1 || !channelRowKey((uint8_t)(row - 1), want, wantIdx) || !channelRow((uint8_t)(row - 1), cr)) {
+            Serial.println("[lora] LORA MSGS <row> -- the row number LORA CHAN prints, or LORA MSGS for all");
+            return true;
+        }
+        Serial.printf("[lora] %s %s: %lu frames opened, %u message%s held\n", protoName(want), cr.name,
+                      (unsigned long)cr.frames, (unsigned)msgCountFor(want, wantIdx),
+                      msgCountFor(want, wantIdx) == 1 ? "" : "s");
+        if (cr.frames > msgCountFor(want, wantIdx))
+            Serial.println("[lora] fewer held than opened: a GRP_DATA opens and is not text, and the ring is shared");
+    }
+    uint16_t shown = 0;
+    for (uint16_t i = 0; i < Msgs::CAP; i++) {
+        Msgs::Msg m;
+        if (byRow) { if (!msgPageFor(want, wantIdx, &m, 1, i)) break; }
+        else       { if (!msgAt(i, m)) break; }
+        char snr[10];
+        snr4Text(m.snr4, snr, sizeof snr);
+        // "via" rather than a bare RSSI when the copy came off a relay: the
+        // figure is the relay's link to here, the same distinction the NODES
+        // view makes with a v.
+        // A Meshtastic critical alert is text on the same channel as the chat and
+        // is marked, not mixed in: the port travels with the row for exactly
+        // this (include/lora_msgs.h).
+        const char* kind = (m.proto == Proto::MESHTASTIC && m.port == Meshtastic::PORT_ALERT) ? "ALERT " : "";
+        Serial.printf("[lora] %4lus ago  %-9s ch%-2u %4d dBm snr %s %-4s %-20s %s%s\n",
+                      (unsigned long)((now - m.ms) / 1000), protoName(m.proto), (unsigned)m.chan,
+                      (int)m.rssi, snr, m.direct ? "" : "via", m.sender[0] ? m.sender : "-", kind, m.text);
+        shown++;
+    }
+    if (!shown) {
+        Serial.println("[lora] no messages held. A channel with no key opens nothing, and a GRP_DATA is not text.");
+        return true;
+    }
+    Serial.printf("[lora] %u shown; %lu decoded since boot, %lu pushed out of the ring of %u\n",
+                  (unsigned)shown, (unsigned long)Msgs::total(), (unsigned long)Msgs::dropped(),
+                  (unsigned)Msgs::CAP);
+    Serial.println("[lora] the sender is a CLAIMED name: a group message carries no signature over it.");
+    return true;
+}
+
 bool console(const char* line) {
     if (strncasecmp(line, "LORA", 4) != 0) return false;
     const char* a = line + 4;
@@ -924,7 +1373,17 @@ bool console(const char* line) {
         else Serial.println("[lora] LORA FOCUS <n> -- see LORA LIST");
         return true;
     }
-    if (strcasecmp(a, "SURVEY") == 0) { setMode(Mode::SURVEY); Serial.println("[lora] survey"); return true; }
+    if (strcasecmp(a, "SURVEY") == 0) {
+        setMode(Mode::SURVEY);
+        Serial.println("[lora] survey: the radio walks the enabled profiles");
+        // Two unrelated things share the word. Said here rather than left for
+        // somebody to discover, because the antenna survey is the one an owner
+        // came looking for.
+        Serial.println("[lora] (the ANTENNA survey is LORA SURVEY START|STOP|LIST|SHOW|CMP|LIVE -- a different thing)");
+        return true;
+    }
+    if (strncasecmp(a, "SURVEY", 6) == 0 && (a[6] == ' ' || a[6] == '\t')) return surveyConsole(a + 6);
+    if (strncasecmp(a, "MSGS", 4) == 0 && (a[4] == '\0' || a[4] == ' ')) return msgsConsole(a + 4);
     if (strcasecmp(a, "SWEEPING") == 0 || strcasecmp(a, "SPECTRUM") == 0) { setMode(Mode::SWEEP); Serial.println("[lora] sweeping 863-870 MHz; the STATS view draws it"); return true; }
     if (strcasecmp(a, "TAP") == 0) { s_tap = !s_tap; Serial.printf("[lora] LoRaTap lines %s\n", s_tap ? "on: tools/loratap2pcap.py turns the log into a pcap" : "off"); return true; }
     if (strcasecmp(a, "OFF") == 0)    { setMode(Mode::OFF); Serial.println("[lora] off"); return true; }
@@ -1053,8 +1512,9 @@ bool console(const char* line) {
         Serial.printf("[lora] %u node(s)\n", (unsigned)n);
         return true;
     }
-    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | CHAN | NODES | LOOKUPS | FEED | SWEEP [kHz from to step]");
+    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | CHAN | NODES | LOOKUPS | FEED | MSGS | SWEEP [kHz from to step]");
     Serial.println("[lora] LORA CHAN on its own lists the keys and the rest of its words");
+    Serial.println("[lora] LORA SURVEY START|STOP|LIST|SHOW|CMP|LIVE is the ANTENNA test; bare LORA SURVEY is the radio mode");
     return true;
 }
 

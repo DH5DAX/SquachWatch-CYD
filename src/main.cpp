@@ -6298,7 +6298,15 @@ void loop() {
             }
             if (tp.valid && gestureActive) {
                 int dy = tp.y - lastY;
-                if (abs(dy) > 10) {
+                // One row of finger travel is one row of list. The flat 10 px
+                // this compared against was half a row once the rows became
+                // finger-sized (20 logical px, which is 7.6 mm on this panel --
+                // src/ui_lora.cpp has the arithmetic), so the list ran away
+                // under the thumb at twice its speed; on the survey's 32 px
+                // rows it was three times. It also means a wobble during a tap
+                // stays a tap, which on a target that size it is.
+                const int step = uiLoraDragStep(*canvas);
+                if (abs(dy) > step) {
                     gestureMoved = true;
                     uiLoraScroll(dy > 0 ? -1 : 1);
                     lastY = tp.y;

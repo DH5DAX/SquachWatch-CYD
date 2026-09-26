@@ -101,6 +101,10 @@ UI_SRCS  := $(SRC)/theme.cpp \
             $(SRC)/lora_aprs.cpp \
             $(SRC)/lora_fanet.cpp \
             $(SRC)/lora_nodes.cpp \
+            $(SRC)/lora_survey.cpp \
+            $(SRC)/lora_msgs.cpp \
+            $(SRC)/lora_json.cpp \
+            $(SRC)/lora_feed.cpp \
             $(SRC)/lora_ident.cpp \
             $(SRC)/lora_enrich.cpp \
             $(SRC)/detection_info.cpp \

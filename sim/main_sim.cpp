@@ -70,6 +70,7 @@
 #include "ui_sysprops.h"
 #include "ota_core.h"
 #include "ui_wifinets.h"
+#include "ui_lora.h"
 #include "png_writer.h"
 #include "touch_cal.h"
 
@@ -691,6 +692,7 @@ int main(int argc, char** argv) {
         else if (screen == "petunlock" || screen == "unlock") uiOutfitUnlockTick(frame, t, engine);
         else if (screen == "sysprops") uiSysPropsTick(frame, t, engine);
         else if (screen == "wifinets") uiWifiNetsTick(frame, t);
+        else if (screen == "lora")     uiLoraTick(frame, t, engine);
         else if (screen == "wifiadd")  uiWifiAddTick(frame, t, engine);
         else if (screen == "poses") {
             // Every arm movement he has, for the costume test in
@@ -766,6 +768,21 @@ int main(int argc, char** argv) {
     else if (screen == "diagnostics") uiDiagnosticsInit(frame);
     else if (screen == "colorcheck") uiColorCheckInit(frame);
     else if (screen == "icons")      {}
+    else if (screen == "lora")       {
+        // The LORA screen has ten views and no radio behind it here, so what
+        // this renders is the chrome and the empty states -- which is most of
+        // what layout work is about, and all of it that can be checked without
+        // the board. SQUACHSIM_LORAVIEW=N is the LoraView to open on;
+        // SQUACHSIM_LORATAP="x,y" issues one tap first, which is how the views
+        // that need a subject chosen (the picker, a channel's messages) are
+        // reached here as well as on the device.
+        const char* v = getenv("SQUACHSIM_LORAVIEW");
+        uiLoraInit(frame, (LoraView)(v ? atoi(v) : 0));
+        if (const char* tp = getenv("SQUACHSIM_LORATAP")) {
+            int tx = 0, ty = 0;
+            if (sscanf(tp, "%d,%d", &tx, &ty) == 2) uiLoraTap(frame, tx, ty, W, H);
+        }
+    }
     else if (screen == "boot")       uiBootInit(frame);
     else if (screen == "update")     uiUpdateInit(frame);
     else if (screen == "nudge")      { const uint8_t v[3] = { 1, 7, 6 }; uiNudgeInit(frame, "BIGFOOT", v, 30, 0); }

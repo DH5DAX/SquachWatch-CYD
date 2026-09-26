@@ -6,6 +6,8 @@
 #include "lora_aprs.h"
 #include "lora_fanet.h"
 #include "lora_profiles.h"
+#include "lora_survey.h"
+#include "lora_msgs.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -65,6 +67,18 @@ static void heard(Node& n, const Packet& pk, uint32_t now, Link link) {
         n.viaRssi = pk.rssi; n.viaSnr4 = pk.snr4;
         n.viaPackets++;
     }
+    if (link == LINK_DIRECT) {
+        // The antenna survey is fed from HERE and from nowhere else, because
+        // this is the one place the DIRECT/VIA rule is decided -- a second copy
+        // of that rule, in a file whose whole premise is "direct only", would
+        // be two rules drifting apart. Kept outside the branch above so it sits
+        // next to nothing else and is obvious.
+        //
+        // n.tag is still empty on a node's FIRST frame: every decoder fills it
+        // in after calling heard(). The survey keeps the newest non-empty tag it
+        // is offered, so the second frame from a station names it.
+        Survey::noteDirect(n.proto, n.id, n.tag, pk.rssi, pk.snr4, now);
+    }
     if (n.dutyLimit && dutyKnown(n, now) && dutyPermille(n, now) > n.dutyLimit) n.flags |= NF_DUTY;
     else                                                                        n.flags &= (uint8_t)~NF_DUTY;
 }
@@ -112,6 +126,22 @@ static void noteMeshtastic(const Packet& pk, uint32_t now) {
             if (n.lastTelemMs && now - n.lastTelemMs < 5 * 60000u) n.flags |= NF_CHATTY;
             n.lastTelemMs = now;
             break;
+        // Kept rather than printed and forgotten: see include/lora_msgs.h. A
+        // Meshtastic text frame names its sender only by the header's `from`, so
+        // the sender string is n.tag -- the short name once a NodeInfo has
+        // arrived, and the "!3b1c9a2e" node number until then.
+        //
+        // PORT_ALERT rides along because it is text somebody wrote and meant to
+        // be read, and the port travels with the row so a view can mark it as
+        // the alert it is. PORT_RANGE_TEST and PORT_DETECTION also decode into
+        // `text` and are deliberately NOT kept: a range test is a counter a node
+        // emits on a timer and would fill the ring with its own noise, and a
+        // detection is a sensor trigger rather than a message.
+        case Meshtastic::PORT_TEXT:
+        case Meshtastic::PORT_ALERT:
+            Msgs::note(Proto::MESHTASTIC, d.channelIdx, (uint8_t)d.data.portnum, n.tag, d.hdr.from,
+                       d.text, pk, now, away == 0, away);
+            break;
         case Meshtastic::PORT_TELEMETRY:
             // The default is an hour; under thirty minutes is the floor the
             // firmware enforces on the default channel.
@@ -127,6 +157,20 @@ static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
     if (!MeshCore::decode(pk, d)) return;
     if (d.haveChannel) MeshCore::noteChannelHeard(d.channelIdx, now);   // opened, not necessarily text; see noteMeshtastic
     const MeshCore::Frame& f = d.f;
+    // On a flood the path is the hops already TAKEN, so hops == 0 means we
+    // received the sender's own transmission. On the direct routes the path is
+    // the hops still to come and the count says nothing about who transmitted
+    // the copy we heard. Hoisted here because the advert row and the group
+    // message below both need the same test, and two copies of it is how the
+    // two would come to disagree.
+    const bool flood = f.route == MeshCore::ROUTE_FLOOD || f.route == MeshCore::ROUTE_TRANSPORT_FLOOD;
+    // A group message that opened AND parsed into a sender and a line of text.
+    // A GRP_DATA opened and did not: it is counted by noteChannelHeard above
+    // and kept nowhere, which include/lora_msgs.h explains. The sender name is
+    // a string the sender typed -- the frame carries no signature over it.
+    if (d.haveGroup)
+        Msgs::note(Proto::MESHCORE, d.channelIdx, MeshCore::TYPE_GRP_TXT, d.grp.sender, 0,
+                   d.grp.text, pk, now, flood && f.hops == 0, f.hops);
     // Adverts name their sender in full. Everything else names only the
     // last relay (the path's newest hash) or a destination, which is not
     // the sender -- so those count against the relay's row, as relayed.
@@ -137,10 +181,7 @@ static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
         // An advert that crossed repeaters was last transmitted by one of
         // them, so its signal belongs to the relay and not to the advertiser:
         // the bench saw eleven-hop paths routinely (docs/LORA.md section 1).
-        // On a flood the path is the hops already taken, so hops == 0 is
-        // first-hand; on the other routes the path is the hops still to come
-        // and the count says nothing about who transmitted this copy.
-        const bool flood = f.route == MeshCore::ROUTE_FLOOD || f.route == MeshCore::ROUTE_TRANSPORT_FLOOD;
+        // `flood` is the test hoisted above.
         heard(n, pk, now, (flood && f.hops == 0) ? LINK_DIRECT : LINK_VIA);
         snprintf(n.tag, sizeof n.tag, "%02x%02x%02x", d.adv.pubkey[0], d.adv.pubkey[1], d.adv.pubkey[2]);
         if (d.adv.hasName) strncpy(n.name, d.adv.name, sizeof n.name - 1);
@@ -154,7 +195,7 @@ static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
         }
         return;
     }
-    if (f.hops && f.hashSize == 1 && (f.route == MeshCore::ROUTE_FLOOD || f.route == MeshCore::ROUTE_TRANSPORT_FLOOD)) {
+    if (f.hops && f.hashSize == 1 && flood) {
         // The newest path byte is the repeater that just sent this copy.
         const uint8_t h = f.path[f.hops - 1];
         // Match it to an advertised key when one is known; else its own row.

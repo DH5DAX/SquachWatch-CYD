@@ -9,6 +9,8 @@
 #include "lora_ident.h"
 #include "lora_enrich.h"
 #include "lora_feed.h"
+#include "lora_meshcore.h"
+#include "lora_meshtastic.h"
 #include "settings.h"
 #include <Arduino.h>
 #include <string.h>
@@ -16,12 +18,84 @@
 
 namespace {
 
+// ---- what is showing -------------------------------------------------------
+
 LoraView s_view = LoraView::LIST;
-int      s_scroll[5] = { 0, 0, 0, 0, 0 };   // one per LoraView, PACKET's unused
+LoraView s_under = LoraView::LIST;   // what the picker is covering, so BACK goes back
+int      s_scroll[(int)LoraView::COUNT] = { 0 };
 uint16_t s_open = 0;          // PACKET: which frame, newest first
 uint32_t s_openTotal = 0;     // ...at which packetTotal(), so it tracks as new ones arrive
 
+// LIST showing only MeshCore adverts. A flag and not a view of its own: it is
+// the same ring, the same rows and the same tap, and the only difference is
+// which frames are drawn (see advertFrame below).
+bool     s_adverts = false;
+
+// CHANMSG: which channel is open. The decoder's own (Proto, index) pair and NOT
+// a CHANS row number, because the row order is MeshCore's list and Meshtastic's
+// flattened together and it shifts as quiet presets start being listed --
+// Lora::channelRowKey is what turns a tapped row into an identity
+// (include/lora_sniffer.h), and findChanRow below walks back the other way when
+// the header and the mute button need the row again.
+Lora::Proto s_msgProto = Lora::Proto::MESHCORE;
+uint8_t     s_msgChan = 0;
+bool        s_msgAll  = false;   // every channel at once, newest first
+
+// SURVEYCMP: which two runs. -1 until a pair is chosen or defaulted.
+int8_t   s_cmpA = -1, s_cmpB = -1;
+
+// ---- geometry --------------------------------------------------------------
+
 const int BODY_TOP = 16;
+
+// A row a finger can hit, and the arithmetic behind the number.
+//
+// The panel is 800x480 over a 7.0" diagonal, which is 933 pixels of diagonal
+// and so 133 pixels to the inch: 0.1905 mm to the physical pixel, 152.4 x
+// 91.4 mm of glass (docs/CROWPANEL7.md). The logical canvas is 400x240 blitted
+// doubled onto it (SQW_LOGICAL_W in include/crowpanel7_board.h), so ONE LOGICAL
+// PIXEL IS 0.381 mm and every number in this file is in those.
+//
+// These rows were fontHeight() + 6 = 14 px. That is 5.33 mm, which is why the
+// channel list could not be hit: the floors everyone publishes are 7.0 mm
+// (Apple's 44 pt at 163 ppi) and 7.62 mm (Android's 48 dp at 160 dpi), and for
+// a thumb rather than a pointing finger the usability literature asks for
+// something closer to 9. fontHeight() + 12 = 20 px is 7.62 mm exactly --
+// Android's number -- and it costs this screen four rows of the thirteen it
+// used to draw. Fewer rows that can be hit beats more rows that cannot.
+//
+// The SURVEY view's rows are bigger again (SURVEY_ROW) because that one is read
+// at arm's length and driven with a thumb while the other hand holds an
+// antenna, and its own button is bigger than that.
+int rowH(TFT_eSPI& t) { t.setTextSize(1); return t.fontHeight() + 12; }
+
+// Where the body starts: under the title bar's corner icons and the status
+// line. Drawing and hit-testing both come through here, because the old code
+// spelled this arithmetic out twice and a third view would have made it three.
+int statusBottom(TFT_eSPI& t) { t.setTextSize(1); return BODY_TOP + 1 + t.fontHeight() + 3; }
+
+// Three buttons where every other screen has its bar: BACK, the picker, and
+// the survey. The margins are tighter than Theme's own 8 and 8 on purpose.
+// Theme::drawButton steps a size-1 label up to size 2 on a panel this wide and
+// then keeps it only if it still fits in w - 6; "[ SURVEY ]" is ten characters,
+// 120 px at size 2, so the box has to be 126 and Theme's margins give 122. At
+// 4 and 4 it is 128 and the whole bar reads at size 2. Half-size lettering on
+// the bar of the screen whose complaint was that things were too small to hit
+// would be a poor joke.
+struct Bar { int y, h, x[3], w; };
+Bar bar(int screenW, int screenH) {
+    Theme::ButtonBarGeom g = Theme::computeButtonBar(screenW, screenH);
+    Bar b;
+    b.y = g.y; b.h = g.h;
+    const int margin = 4, gap = 4;
+    b.w = (screenW - 2 * margin - 2 * gap) / 3;
+    for (int i = 0; i < 3; i++) b.x[i] = margin + i * (b.w + gap);
+    return b;
+}
+
+int bodyBottom(int screenW, int screenH) { return bar(screenW, screenH).y - 4; }
+
+// ---- small shared pieces ---------------------------------------------------
 
 uint16_t protoColor(Lora::Proto p) {
     switch (p) {
@@ -37,63 +111,119 @@ uint16_t protoColor(Lora::Proto p) {
 }
 
 void ageText(uint32_t now, uint32_t ms, char* out, size_t cap) {
+    if (!ms) { snprintf(out, cap, "-"); return; }
     const uint32_t s = (now - ms) / 1000;
     if (s < 60) snprintf(out, cap, "%lus", (unsigned long)s);
     else if (s < 3600) snprintf(out, cap, "%lum", (unsigned long)(s / 60));
     else snprintf(out, cap, "%luh", (unsigned long)(s / 3600));
 }
 
-// Three buttons where every other screen has its bar: BACK and the two
-// views that are not this one (PACKET has < and > instead).
-struct Bar { int y, h, x[3], w; };
-Bar bar(int screenW, int screenH) {
-    Theme::ButtonBarGeom g = Theme::computeButtonBar(screenW, screenH);
-    Bar b;
-    b.y = g.y; b.h = g.h;
-    const int margin = 8, gap = 8;
-    b.w = (screenW - 2 * margin - 2 * gap) / 3;
-    b.x[0] = margin; b.x[1] = margin + b.w + gap; b.x[2] = margin + 2 * (b.w + gap);
-    return b;
+// A duration the way a person reads one at a bench, matching what LORA SURVEY
+// prints on the console (src/lora_sniffer.cpp's surveySpan).
+void spanText(uint32_t ms, char* out, size_t cap) {
+    const uint32_t s = ms / 1000;
+    if (s < 120) snprintf(out, cap, "%lus", (unsigned long)s);
+    else         snprintf(out, cap, "%lum%02lus", (unsigned long)(s / 60), (unsigned long)(s % 60));
 }
 
-// Four destinations and two buttons, so the pair names the NEIGHBOURS in the
-// cycle LIST -> NODES -> STATS -> CHANS -> LIST rather than "the other two":
-// every view is then one or two taps from every other, and a button always
-// says where it lands. PACKET keeps its own < and >.
-const LoraView CYCLE[4] = { LoraView::LIST, LoraView::NODES, LoraView::STATS, LoraView::CHANS };
-
-int cycleSlot(LoraView v) {
-    for (int i = 0; i < 4; i++) if (CYCLE[i] == v) return i;
-    return 0;
+// snr4 is quarter-dB in an int8_t and C++ truncates toward zero, so -3 quarters
+// would print as "0.75" with the sign lost. Sign off first, magnitude on its
+// own -- the same fix lora_survey.cpp's verdictLine carries.
+void snrText(int32_t q, char* out, size_t cap) {
+    const char     sgn = q < 0 ? '-' : '+';
+    const uint32_t mag = (uint32_t)(q < 0 ? -q : q);
+    snprintf(out, cap, "%c%lu.%02lu", sgn, (unsigned long)(mag / 4), (unsigned long)((mag % 4) * 25));
 }
-LoraView cycleStep(LoraView v, int delta) { return CYCLE[(cycleSlot(v) + 4 + delta) % 4]; }
 
-const char* viewLabel(LoraView v) {
+// The name for a row. A node heard exactly once has no tag yet -- every decoder
+// sets it after the frame is counted -- so the id in hex stands in rather than
+// an empty column, exactly as the console does it.
+void nodeName(Lora::Proto p, uint64_t id, const char* tag, char* out, size_t cap) {
+    if (tag && tag[0]) { snprintf(out, cap, "%s", tag); return; }
+    snprintf(out, cap, "%s:%08lx", Lora::protoShort(p), (unsigned long)(id & 0xFFFFFFFFu));
+}
+
+// Right-aligned print: several of the new views put a number at a fixed right
+// edge so that rows line up whatever the number's width, which is the whole
+// point of a column of dBm readings.
+void printRight(TFT_eSPI& t, int right, int y, const char* s) {
+    t.setCursor(right - t.textWidth(s), y);
+    t.print(s);
+}
+
+// Variable-height lists -- the messages, whose blocks are one line or five --
+// cannot use uiClampScroll's row arithmetic. They walk back by one item per
+// redraw whenever the end of the list was drawn with room left under it: at
+// this panel's frame rate that settles before a finger leaves the glass, and it
+// needs no measurement of blocks nobody is looking at. The bug it avoids is the
+// one include/ui_scroll.h was written for -- a list that scrolls on into empty
+// space.
+void easeBack(int& scroll, bool hitEnd, int spare) {
+    if (hitEnd && spare > 0 && scroll > 0) scroll--;
+}
+
+const char* viewTitle(LoraView v) {
     switch (v) {
-        case LoraView::NODES: return "[ NODES ]";
-        case LoraView::STATS: return "[ STATS ]";
-        case LoraView::CHANS: return "[ CHANS ]";
-        default:              return "[ LIST ]";
+        case LoraView::PACKET:    return "LORA FRAME";
+        case LoraView::NODES:     return "LORA NODES";
+        case LoraView::STATS:     return "LORA STATS";
+        case LoraView::CHANS:     return "LORA CHANNELS";
+        case LoraView::CHANMSG:   return "LORA MESSAGES";
+        case LoraView::TRAFFIC:   return "LORA TRAFFIC";
+        case LoraView::SURVEY:    return "ANTENNA SURVEY";
+        case LoraView::SURVEYCMP: return "SURVEY COMPARE";
+        case LoraView::PICK:      return "LORA VIEWS";
+        default:                  return "LORA";
     }
 }
 
 void barLabels(const char* l[3]) {
     l[0] = "[ BACK ]";
-    if (s_view == LoraView::PACKET) { l[1] = "[ < ]"; l[2] = "[ > ]"; return; }
-    l[1] = viewLabel(cycleStep(s_view, -1));
-    l[2] = viewLabel(cycleStep(s_view, +1));
+    l[1] = "[ VIEWS ]";
+    l[2] = "[ SURVEY ]";
+    switch (s_view) {
+        // The frame view keeps its own pair: < is towards the newer frame, > the
+        // older, in the list's order.
+        case LoraView::PACKET:    l[1] = "[ < ]"; l[2] = "[ > ]"; break;
+        // From the survey, the third button is the thing the survey is for.
+        case LoraView::SURVEY:    l[2] = "[ CMP ]"; break;
+        case LoraView::PICK:      l[1] = nullptr; l[2] = nullptr; break;
+        default: break;
+    }
 }
 
-int rowH(TFT_eSPI& t) { t.setTextSize(1); return t.fontHeight() + 6; }
+// The view's name, drawn here rather than by Theme::drawTitleBar -- that helper
+// takes a title and ignores it (src/theme.cpp: `(void)title;`), so this screen
+// has been running without one. With ten views behind three buttons, which view
+// is showing is not a thing to leave to the reader's memory.
+//
+// It goes in the band between the corner icons, which is the only row above the
+// body that nothing else uses, and it is cleared first: the per-frame repaint
+// starts at BODY_TOP, so a title that changed would otherwise print over the
+// one before it.
+void drawTitle(TFT_eSPI& t, int w, const char* title) {
+    const int x0 = Theme::TITLE_ICON_W + 2;
+    // Short of BOTH right-hand icons -- the rotate button and, when a PIN is
+    // set, the padlock beside it.
+    const int x1 = w - 2 * Theme::TITLE_ICON_W - 4;
+    if (x1 <= x0) return;
+    t.fillRect(x0, 0, x1 - x0, BODY_TOP, Theme::BG);
+    t.setTextSize(1);
+    t.setTextColor(Theme::WHITE, Theme::BG);
+    const int tw = t.textWidth(title);
+    t.setCursor(x0 + ((x1 - x0) - tw) / 2, 4);
+    t.print(title);
+}
 
 void drawBar(TFT_eSPI& t, int w, int h) {
     const Bar b = bar(w, h);
     const char* l[3]; barLabels(l);
-    for (int i = 0; i < 3; i++) Theme::drawButton(t, b.x[i], b.y, b.w, b.h, l[i], false);
+    for (int i = 0; i < 3; i++)
+        if (l[i]) Theme::drawButton(t, b.x[i], b.y, b.w, b.h, l[i], false);
 }
 
-// One line under the title: the mode, where the radio is, and the numbers
-// that say whether it is hearing anything.
+// One line under the title: the mode, where the radio is, and the numbers that
+// say whether it is hearing anything.
 int drawStatus(TFT_eSPI& t, int w, int y) {
     t.setTextSize(1);
     t.setTextWrap(false);
@@ -115,7 +245,158 @@ int drawStatus(TFT_eSPI& t, int w, int y) {
     return y + t.fontHeight() + 3;
 }
 
+// ---- LIST: every frame, and the same ring filtered to adverts ---------------
+
+// Is this frame a MeshCore advert? Route and type out of the header plus a
+// length check, and no crypto at all -- unlike Lora::summary, which calls
+// MeshCore::decode and opens a group message with the channel key. That is what
+// makes the test cheap enough to run over frames the filter only walks past.
+//
+// MeshCore only, and the view says so: an advert is a MeshCore frame type. The
+// nearest Meshtastic equivalent is a NODEINFO_APP packet, which arrives
+// encrypted on a channel and is not readable without the key, so it is not the
+// same thing and is not quietly folded in here.
+bool advertFrame(const Lora::Packet& pk, MeshCore::Frame& f) {
+    if (pk.proto != Lora::Proto::MESHCORE) return false;
+    if (pk.flags & Lora::PK_CRC_ERR) return false;          // a broken frame is not a sighting
+    if (!MeshCore::parse(pk.data, pk.len, f)) return false;
+    return f.type == MeshCore::TYPE_ADVERT;
+}
+
+// The ring rows the ADVERTS filter is showing, and the frame count they were
+// found at.
+//
+// Rebuilt when packetTotal() moves -- a frame landed, and a new advert may
+// belong at the top -- or when the scroll moves, and NOT once per redraw. The
+// filter has to walk the ring to find its rows; the ring is 256 records of 288
+// bytes in PSRAM, 73 kB, and a ring with no adverts in it at all is walked to
+// the end. That is not a thing to copy out thirty times a second in order to
+// draw nine lines. On this band a frame lands seconds apart and a redraw happens
+// every frame, so the walk is rare and the drawing is nine packetAt calls.
+//
+// Row numbers and not copies of the frames: twelve uint16_t is 24 bytes of
+// internal RAM, twelve Packets would be 3.5 kB, and the row number is also what
+// a tap needs in order to open PACKET on the right frame.
+static const uint8_t ADV_ROWS = 12;      // more than the body holds at rowH()
+uint16_t s_advRow[ADV_ROWS];
+uint8_t  s_advN = 0;
+uint32_t s_advAt = 0;
+int      s_advScroll = -1;
+bool     s_advEnd = false;    // the walk reached the oldest frame in the ring
+uint16_t s_advSeen = 0;       // frames examined, so the empty line can say how many
+
+void advRebuild(int scroll, uint8_t want) {
+    s_advN = 0; s_advEnd = false; s_advSeen = 0;
+    if (want > ADV_ROWS) want = ADV_ROWS;
+    if (!want) return;
+    // Six records, 1,728 bytes of stack. A page rather than a record at a time
+    // because push() runs on the radio task inside the sniffer's mutex, so every
+    // acquisition is a chance to wait on a decoder (include/lora_sniffer.h); six
+    // rather than sixteen because the Arduino loop task has an 8 kB stack and
+    // this is a drawing path.
+    Lora::Packet page[6];
+    const uint16_t cap = (uint16_t)(sizeof page / sizeof page[0]);
+    uint16_t from = 0, got = 0;
+    int skip = scroll < 0 ? 0 : scroll;
+    do {
+        got = Lora::packetSnapshot(page, cap, from);
+        for (uint16_t i = 0; i < got; i++) {
+            s_advSeen++;
+            MeshCore::Frame f;
+            if (!advertFrame(page[i], f)) continue;
+            if (skip > 0) { skip--; continue; }
+            s_advRow[s_advN++] = (uint16_t)(from + i);
+            if (s_advN >= want) return;      // full: the rest of the ring stays unread
+        }
+        from = (uint16_t)(from + got);
+    } while (got == cap);
+    s_advEnd = true;
+}
+
+void advSync(int scroll, uint8_t want) {
+    const uint32_t total = Lora::packetTotal();
+    if (s_advScroll == scroll && s_advAt == total) return;
+    s_advAt = total; s_advScroll = scroll;
+    advRebuild(scroll, want);
+}
+
+void advForget() { s_advScroll = -1; s_advAt = 0; s_advN = 0; }
+
+// An advert's own row, rather than Lora::summary's generic line: the advert
+// carries a name, what the node says it is, and where it says it is, and those
+// are what somebody filtering to adverts came for.
+void drawAdvertRow(TFT_eSPI& t, uint32_t now, int w, int y, int rh,
+                   const Lora::Packet& pk, const MeshCore::Frame& f) {
+    MeshCore::Advert adv;
+    const bool body = MeshCore::parseAdvert(f, adv);
+    // Bright for an advert off the node's own transmitter, dim for one a
+    // repeater passed on. The difference is the whole premise of the survey next
+    // door: a relayed copy's signal is the last repeater's link to here.
+    const uint16_t col = f.hops ? Theme::VAPOR_PURPLE : Theme::CYAN;
+    Theme::drawListRowPanel(t, w, y, rh);
+    t.fillRect(4, y + 3, 4, rh - 6, col);
+    char age[8]; ageText(now, pk.ms, age, sizeof age);
+    char where[8] = "";
+    // latE6 x 10 is at most 900,000,000 and lonE6 x 10 at most 1,800,000,000:
+    // both inside an int32_t, so the unit change is safe.
+    if (body && adv.hasLatLon) Lora::Ident::grid(adv.latE6 * 10, adv.lonE6 * 10, where, sizeof where);
+    char hops[10];
+    if (f.hops) snprintf(hops, sizeof hops, "%u hop%s", (unsigned)f.hops, f.hops == 1 ? "" : "s");
+    else        snprintf(hops, sizeof hops, "direct");
+    char line[128];
+    snprintf(line, sizeof line, "%4d %4s %-16.16s %-8s %-7s %s", (int)pk.rssi, age,
+             !body ? "(unreadable)" : adv.hasName && adv.name[0] ? adv.name : "(no name)",
+             body ? MeshCore::nodeTypeName(adv.nodeType) : "", where, hops);
+    t.setTextSize(1);
+    t.setTextColor(col, Theme::BG);
+    t.setCursor(12, y + (rh - t.fontHeight()) / 2);
+    t.print(line);
+}
+
+void drawAdverts(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    const int rh = rowH(t);
+    const int visible = (bottom - top) / rh;
+    int& scroll = s_scroll[(int)LoraView::LIST];
+    if (scroll < 0) scroll = 0;
+    advSync(scroll, (uint8_t)(visible > 0 ? visible : 1));
+    if (!s_advN) {
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setCursor(8, top + 20);
+        if (!Lora::present())      t.print("");
+        else if (!Lora::packetCount()) t.print("nothing heard yet");
+        else if (scroll > 0)       t.print("no older adverts");
+        else {
+            char line[96];
+            snprintf(line, sizeof line, "no MeshCore adverts among the last %u frames", (unsigned)s_advSeen);
+            t.print(line);
+            t.setCursor(8, top + 20 + rh);
+            t.print("an advert names a node, its role and where it says it is,");
+            t.setCursor(8, top + 20 + 2 * rh);
+            t.print("in the clear -- no key opens it and none is needed.");
+        }
+        // Nothing found where something was expected is also how the list gets
+        // back to the top when the frames it was scrolled past have aged out.
+        easeBack(scroll, true, 1);
+        return;
+    }
+    int y = top;
+    Lora::Packet pk;
+    uint8_t drawn = 0;
+    for (uint8_t i = 0; i < s_advN && y + rh <= bottom; i++) {
+        if (!Lora::packetAt(s_advRow[i], pk)) break;
+        MeshCore::Frame f;
+        if (!advertFrame(pk, f)) continue;   // the ring moved under us; the next redraw rebuilds
+        drawAdvertRow(t, now, w, y, rh, pk, f);
+        y += rh; drawn++;
+    }
+    // No scrollbar: how many adverts the ring holds is not known without walking
+    // all of it every redraw, and a thumb drawn from a guess is worse than no
+    // thumb at all. The scroll still works -- the walk simply skips further in.
+    if (s_advEnd) easeBack(scroll, true, visible - drawn);
+}
+
 void drawList(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    if (s_adverts) { drawAdverts(t, now, w, top, bottom); return; }
     const int rh = rowH(t);
     const uint16_t count = Lora::packetCount();
     uiClampScroll(s_scroll[0], count, bottom - top, rh);
@@ -137,8 +418,9 @@ void drawList(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         Lora::summary(pk, sum, sizeof sum);
         snprintf(line, sizeof line, "%-4s %4d %4s %s", Lora::protoShort(pk.proto), (int)pk.rssi, age,
                  (pk.flags & Lora::PK_CRC_ERR) ? "CRC ERR" : sum);
+        t.setTextSize(1);
         t.setTextColor(col, Theme::BG);
-        t.setCursor(12, y + 3);
+        t.setCursor(12, y + (rh - t.fontHeight()) / 2);
         t.print(line);
     }
     Theme::drawScrollbar(t, w - 6, top, bottom - top, count, (bottom - top) / rh, s_scroll[0]);
@@ -199,7 +481,7 @@ void drawPacket(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
 
 void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     const int rh = rowH(t);
-    uint8_t idx[96];
+    uint8_t idx[Lora::Nodes::CAP];
     const uint8_t count = Lora::nodeOrder(idx, sizeof idx);
     uiClampScroll(s_scroll[2], count, bottom - top, rh);
     if (!count) {
@@ -270,34 +552,42 @@ void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         snprintf(line, sizeof line, "%-4s %-10.10s %-14.14s %5s %3u %4s %-5s %-6s %s%s%s", Lora::protoShort(n.proto), n.tag,
                  n.name[0] ? n.name : named[0] ? named : Lora::Nodes::roleText(n), sig, (unsigned)n.packets, age,
                  dut, where, look, flags[0] ? "!" : "", flags);
+        t.setTextSize(1);
         t.setTextColor(n.flags ? Theme::AMBER : col, Theme::BG);
-        t.setCursor(12, y + 3);
+        t.setCursor(12, y + (rh - t.fontHeight()) / 2);
         t.print(line);
     }
     Theme::drawScrollbar(t, w - 6, top, bottom - top, count, (bottom - top) / rh, s_scroll[2]);
 }
 
-// The keys the decoders hold: which are known, which have been heard, and
-// which are switched off. A tap mutes one, and that is deliberately all a
-// finger can do -- see the header.
+// ---- CHANS: the keys the decoders hold -------------------------------------
+// Which are known, which have been heard, and which are switched off. A tap
+// used to mute one; it opens what came through it now, which is what the whole
+// list is for -- a list of locks is not a list of what came through them. Muting
+// moved into that view, where there is room for a button a finger can hit
+// instead of a hidden strip at the end of a 5 mm row.
+
+int chansListTop(TFT_eSPI& t) { t.setTextSize(1); return statusBottom(t) + t.fontHeight() + 4; }
+
 void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     t.setTextSize(1);
     const int rh = rowH(t);
     const int lh = t.fontHeight() + 2;
     uint8_t mcU = 0, mcM = 0, mtU = 0, mtM = 0;
     Lora::channelCapacity(mcU, mcM, mtU, mtM);
-    char head[80];
+    char head[96];
     // The presets are counted rather than listed: fourteen radio profiles
     // times two key modes is twenty-eight rows of decoder capability, not
     // twenty-eight channels anybody chose. One appears in the list as soon as
     // it opens a frame.
-    snprintf(head, sizeof head, "keys: %u/%u MC, %u/%u MT, %u presets quiet",
-             (unsigned)mcU, (unsigned)mcM, (unsigned)mtU, (unsigned)mtM, (unsigned)Lora::channelsQuietBuiltIn());
+    snprintf(head, sizeof head, "keys: %u/%u MC, %u/%u MT, %u quiet presets, %u held",
+             (unsigned)mcU, (unsigned)mcM, (unsigned)mtU, (unsigned)mtM,
+             (unsigned)Lora::channelsQuietBuiltIn(), (unsigned)Lora::msgCount());
     t.setTextColor(Theme::CYAN, Theme::BG);
     t.setCursor(6, top);
     t.print(head);
 
-    const int listTop = top + lh + 2;
+    const int listTop = chansListTop(t);
     const int listBottom = bottom - lh - 2;
     const uint8_t count = Lora::channelRowCount();
     uiClampScroll(s_scroll[(int)LoraView::CHANS], count, listBottom - listTop, rh);
@@ -313,12 +603,21 @@ void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         t.fillRect(4, y + 3, 4, rh - 6, col);
         char age[8] = "-";
         if (r.lastMs) ageText(now, r.lastMs, age, sizeof age);
+        // How many of that channel's messages are actually readable in there,
+        // beside how many frames its key has opened. The two differ on purpose
+        // and the gap is informative: a GRP_DATA opens and is not text, and the
+        // message ring is shared, so a busy channel pushes a quiet one's older
+        // lines out (include/lora_msgs.h). It also makes the tap worth making --
+        // a row saying 12 is a row with something behind it.
+        Lora::Proto kp; uint8_t ki;
+        const unsigned held = Lora::channelRowKey((uint8_t)i, kp, ki) ? Lora::msgCountFor(kp, ki) : 0;
         char line[128];
-        snprintf(line, sizeof line, "%-4s %-16.16s %02x %-8s %5lu %4s %s", Lora::protoShort(r.proto), r.name,
+        snprintf(line, sizeof line, "%-4s %-14.14s %02x %-8s %5lu %4u %4s %s", Lora::protoShort(r.proto), r.name,
                  (unsigned)r.hash, r.builtIn ? "built in" : r.derived ? "tag" : r.keyBits ? "key" : "plain",
-                 (unsigned long)r.frames, age, r.enabled ? "" : "MUTED");
+                 (unsigned long)r.frames, held, age, r.enabled ? "" : "MUTED");
+        t.setTextSize(1);
         t.setTextColor(col, Theme::BG);
-        t.setCursor(12, y + 3);
+        t.setCursor(12, y + (rh - t.fontHeight()) / 2);
         t.print(line);
     }
     Theme::drawScrollbar(t, w - 6, listTop, listBottom - listTop, count, (listBottom - listTop) / rh,
@@ -327,9 +626,984 @@ void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     t.setCursor(6, bottom - lh);
     // With nothing of one's own in the list, the useful sentence is the one
     // that fills it; after that, the one that says what a finger can do.
-    t.print(mcU + mtU ? "tap to mute; the console adds them: LORA CHAN"
+    t.print(mcU + mtU ? "tap a channel to read it; the console adds keys: LORA CHAN"
                       : "no keys of your own: LORA CHAN GROUP lists ten sets");
 }
+
+// ---- CHANMSG: what came through one key ------------------------------------
+
+// The CHANS row this channel is on RIGHT NOW. The row order is MeshCore's list
+// and Meshtastic's flattened together and it shifts as quiet presets start being
+// listed, so the row number a tap arrived from is re-found by identity on every
+// redraw rather than kept and trusted.
+bool findChanRow(Lora::Proto p, uint8_t chan, uint8_t& row, Lora::ChannelRow& out) {
+    const uint8_t n = Lora::channelRowCount();
+    for (uint8_t i = 0; i < n; i++) {
+        Lora::Proto rp; uint8_t ri;
+        if (!Lora::channelRowKey(i, rp, ri)) continue;
+        if (rp != p || ri != chan) continue;
+        if (!Lora::channelRow(i, out)) return false;
+        row = i;
+        return true;
+    }
+    return false;
+}
+
+// The mute button's box: the top right of the header, clear of the identity
+// line. 104 x 20 logical pixels is 39 x 7.6 mm -- the same 7.62 mm floor the
+// rows use, and wide enough that Theme::drawButton keeps "[ MUTE ]" at size 2.
+void msgMuteBox(int w, int top, int& bx, int& by, int& bw, int& bh) {
+    bw = 104; bh = 20; bx = w - bw - 6; by = top + 1;
+}
+
+void drawChanMsg(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    t.setTextSize(1);
+    const int lh = t.fontHeight() + 2;
+    uint8_t row = 0;
+    Lora::ChannelRow r = {};
+    const bool have = !s_msgAll && findChanRow(s_msgProto, s_msgChan, row, r);
+    const uint16_t held = s_msgAll ? Lora::msgCount() : Lora::msgCountFor(s_msgProto, s_msgChan);
+
+    // The identity line. A channel is a key and a name, and what it has opened
+    // is a different number from what is readable in the ring.
+    char head[96];
+    if (s_msgAll)
+        snprintf(head, sizeof head, "every channel: %u held of %u, %lu pushed out",
+                 (unsigned)held, (unsigned)Lora::Msgs::CAP, (unsigned long)Lora::msgDropped());
+    else if (have)
+        snprintf(head, sizeof head, "%s %-14.14s %s  %lu opened  %u readable", Lora::protoShort(r.proto), r.name,
+                 r.builtIn ? "built in" : r.derived ? "tag" : r.keyBits ? "key" : "plain",
+                 (unsigned long)r.frames, (unsigned)held);
+    else
+        snprintf(head, sizeof head, "that channel is no longer in the list");
+    // Cut to whatever is left of the row once the mute button has had its
+    // corner: the button is drawn after this line and would otherwise paint
+    // over the tail of it, which is how "12 readable" became "12 reada".
+    int bx = w, by = 0, bw = 0, bh = 0;
+    if (have) msgMuteBox(w, top, bx, by, bw, bh);
+    const int headMax = (bx - 10) / 6;
+    if (headMax > 0 && (int)strlen(head) > headMax) head[headMax] = '\0';
+    t.setTextColor(have && !r.enabled ? Theme::VAPOR_PURPLE : Theme::CYAN, Theme::BG);
+    t.setCursor(6, top + 2);
+    t.print(head);
+
+    // A toggle and not two labels: the button says MUTE always and is drawn
+    // pressed while the channel is muted, which is one word to read instead of
+    // two to tell apart, and stays at size 2 in both states.
+    if (have) Theme::drawButton(t, bx, by, bw, bh, "[ MUTE ]", !r.enabled);
+    // Theme::drawButton leaves the text size where it put the label -- size 2
+    // on a panel this wide -- and everything below here is set at size 1.
+    t.setTextSize(1);
+
+    const int listTop = top + lh + 12;
+    if (!held) {
+        // What an empty channel means depends entirely on WHY it is empty, and
+        // these are different facts about the world, not one message with
+        // different wording.
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        const char* l1 = "";
+        const char* l2 = "";
+        if (s_msgAll) {
+            l1 = "nothing decoded yet.";
+            l2 = "a channel with no key opens nothing, and a GRP_DATA is not text";
+        } else if (!have) {
+            l1 = "the channel is gone from the list.";
+            l2 = "LORA CHAN on the console says which keys are held";
+        } else if (!r.enabled) {
+            l1 = "MUTED: this key is not being tried on anything.";
+            l2 = "tap MUTE again and the decoders start offering frames to it";
+        } else if (!r.frames) {
+            l1 = "this key has never opened a frame.";
+            l2 = r.keyBits ? "either nobody is using the channel, or the key is wrong"
+                           : "nothing on it has been heard at all yet";
+        } else {
+            l1 = "frames opened on this key, none of them a message.";
+            l2 = "a GRP_DATA is a position or a sensor reading, not text -- and the";
+        }
+        t.setCursor(8, listTop + 4);      t.print(l1);
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setCursor(8, listTop + 4 + lh); t.print(l2);
+        if (have && r.frames && r.enabled) {
+            t.setCursor(8, listTop + 4 + 2 * lh);
+            t.print("ring of 256 is shared, so a busy channel pushes old lines out");
+        }
+        return;
+    }
+
+    // The messages themselves, newest first. Variable-height blocks: a chat
+    // line is usually one row and occasionally five, and a fixed block either
+    // truncates the long one or spends the screen on the short ones.
+    const int cols = (w - 22) / 6;
+    // Short of the foot line, which is drawn last and would otherwise have a
+    // message printed over it.
+    const int listBottom = bottom - lh - 2;
+    int& scroll = s_scroll[(int)LoraView::CHANMSG];
+    if (scroll < 0) scroll = 0;
+    if (scroll >= (int)held) scroll = held - 1;
+    int y = listTop;
+    bool hitEnd = false;
+    for (uint16_t i = (uint16_t)scroll; y + lh * 2 <= listBottom; i++) {
+        Lora::Msgs::Msg m;
+        // One message at a time, which for this ring is one lock and one walk of
+        // 256 comparisons either way: pageFor does the whole walk inside the
+        // sniffer's mutex whatever the page size (include/lora_msgs.h), so a
+        // page of one costs a walk and a page of four costs the same walk.
+        const bool ok = s_msgAll ? Lora::msgAt(i, m) : (Lora::msgPageFor(s_msgProto, s_msgChan, &m, 1, i) == 1);
+        if (!ok) { hitEnd = true; break; }
+        const uint16_t col = protoColor(m.proto);
+        // A Meshtastic critical alert is text on the same channel as the chat
+        // and is labelled rather than mixed in: the port travels with the row
+        // for exactly this (include/lora_msgs.h).
+        const bool alert = m.proto == Lora::Proto::MESHTASTIC && m.port == Meshtastic::PORT_ALERT;
+        char age[8], snr[10], meta[128];
+        ageText(now, m.ms, age, sizeof age);
+        snrText(m.snr4, snr, sizeof snr);
+        // "via" rather than a bare RSSI when the copy came off a relay: the
+        // figure is then the relay's link to here and says nothing about how far
+        // away the sender is, the same distinction the NODES view makes with a v.
+        snprintf(meta, sizeof meta, "%4s  %-18.18s %4d dBm snr %s %s%s", age,
+                 m.sender[0] ? m.sender : "-", (int)m.rssi, snr,
+                 m.direct ? "" : "via ", alert ? "ALERT" : "");
+        t.setTextSize(1);
+        t.setTextColor(alert ? Theme::AMBER : col, Theme::BG);
+        t.setCursor(8, y);
+        t.print(meta);
+        y += lh;
+        t.setTextColor(alert ? Theme::AMBER : Theme::WHITE, Theme::BG);
+        for (const char* p = m.text; *p && y + lh <= listBottom; ) {
+            int n = (int)strlen(p); if (n > cols) n = cols;
+            if (n == cols) { int k = n; while (k > cols / 2 && p[k] != ' ') k--; if (k > cols / 2) n = k; }
+            char seg[80]; if (n > (int)sizeof seg - 1) n = (int)sizeof seg - 1;
+            memcpy(seg, p, (size_t)n); seg[n] = '\0';
+            t.setCursor(14, y); t.print(seg); y += lh;
+            p += n; while (*p == ' ') p++;
+        }
+        t.drawFastHLine(8, y + 1, w - 18, Theme::PURPLE);
+        y += 5;
+    }
+    easeBack(scroll, hitEnd, listBottom - y);
+    // The sender is a claim and the view says so once, at the foot, rather than
+    // on every line: a MeshCore group message carries no signature over the name
+    // in front of the colon, so anyone on the channel can type anyone's.
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.setCursor(6, bottom - lh + 2);
+    t.print("the sender is a claimed name: a group message is not signed");
+}
+
+// ---- TRAFFIC: the rate and the occupancy of the air, as they move ----------
+//
+// WHAT THIS ADDS OVER LIST, because the honest answer is "one thing, and it is
+// the only thing that needed a second view". LIST already shows every frame
+// newest first with its network, its signal and its decode, and no monitor is
+// going to beat that at "what just arrived" -- the newest-frame line here is
+// one row of the same thing and exists only so the screen is visibly alive.
+// What LIST cannot show at any length is a SHAPE: whether the air is busier
+// than it was a minute ago, whether a burst is a burst or the new normal, and
+// how much of the time the receiver was listening it was actually occupied.
+// Those are differences of the counters over time, so this view keeps its own
+// history of them and draws it. It is also the view that says whether an
+// antenna run is being taken on a band that is talking at all.
+//
+// It must not cost the frame. Per redraw it takes one Stats reference, one
+// packetAt for the newest frame, and about 170 small fillRects -- src/frame_prof.cpp
+// watches the budget and this panel has to keep drawing while a run is recording.
+
+static const uint8_t  TR_BUCKETS = 84;     // 4 px each = 336, the graph's width
+static const uint16_t TR_MS      = 2000;   // so the graph spans 2 min 48 s
+// One byte for the frames and one for the occupancy: 168 bytes of internal RAM,
+// which is what a picture of the last three minutes costs. The counters in
+// Lora::Stats are totals since boot and keep no history at all -- a realtime
+// monitor differences them itself (include/lora_sniffer.h) -- so this is the
+// view's own memory and nothing else can be asked for it.
+//
+// A bucket cannot overflow a byte: frames saturate at 255 and at SF8/62.5 kHz a
+// short frame is a couple of hundred milliseconds of air, so two seconds does
+// not hold forty of them, let alone 255. Occupancy is per-mille capped at 255,
+// which is 25.5 % of the listening time -- a figure this band does not reach,
+// and the graph relabels its own scale when it does.
+struct TrBucket { uint8_t frames, permille; };
+TrBucket s_tr[TR_BUCKETS];
+uint8_t  s_trHead = 0, s_trFilled = 0;
+uint32_t s_trAt = 0, s_trPackets = 0, s_trAir = 0, s_trListen = 0;
+
+// The headline is over the last 30 s -- fifteen buckets. Long enough that one
+// frame does not swing it, short enough to answer "is it busy NOW".
+static const uint8_t TR_WINDOW = 15;
+
+void trafficReset() {
+    memset(s_tr, 0, sizeof s_tr);
+    s_trHead = 0; s_trFilled = 0; s_trAt = 0;
+}
+
+// Called every redraw whatever view is showing, so that opening TRAFFIC after a
+// minute on LIST already has a minute of history behind it. Cheap: a compare,
+// and once every two seconds three subtractions.
+void trafficTick(uint32_t now) {
+    const Lora::Stats& s = Lora::stats();
+    if (!s_trAt) { s_trAt = now; s_trPackets = s.packets; s_trAir = s.airtimeMs; s_trListen = s.listenMs; return; }
+    if (now - s_trAt < TR_MS) return;
+    // More than one whole bucket went by without a redraw, which means this
+    // screen was not the one showing. The history starts over rather than
+    // drawing the hole as quiet air: nothing in the loop takes two seconds, so
+    // a gap is always absence and never silence.
+    if (now - s_trAt >= 2 * TR_MS) {
+        trafficReset();
+        s_trAt = now; s_trPackets = s.packets; s_trAir = s.airtimeMs; s_trListen = s.listenMs;
+        return;
+    }
+    const uint32_t dp = s.packets - s_trPackets;
+    const uint32_t da = s.airtimeMs - s_trAir;
+    const uint32_t dl = s.listenMs - s_trListen;
+    // Occupancy against the time the RECEIVER WAS ON a profile, not against the
+    // wall clock. In Mode::SURVEY the radio spends most of a bucket on other
+    // profiles, and dividing by two seconds there answers a question nobody
+    // asked -- the STATS view's LISTEN line makes the same division for the same
+    // reason.
+    uint32_t pm = dl ? (da * 1000u) / dl : 0;
+    if (pm > 255) pm = 255;
+    s_tr[s_trHead].frames   = dp > 255 ? 255 : (uint8_t)dp;
+    s_tr[s_trHead].permille = (uint8_t)pm;
+    s_trHead = (uint8_t)((s_trHead + 1) % TR_BUCKETS);
+    if (s_trFilled < TR_BUCKETS) s_trFilled++;
+    s_trAt += TR_MS;
+    s_trPackets = s.packets; s_trAir = s.airtimeMs; s_trListen = s.listenMs;
+}
+
+uint8_t trBucketAt(uint8_t i) {   // i = 0 is the oldest held
+    return (uint8_t)((s_trHead + TR_BUCKETS - s_trFilled + i) % TR_BUCKETS);
+}
+
+int drawBigNumber(TFT_eSPI& t, int x, int y, const char* caption, const char* value, uint16_t col) {
+    t.setTextSize(1);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setCursor(x, y);
+    t.print(caption);
+    t.setTextSize(3);
+    t.setTextColor(col, Theme::BG);
+    t.setCursor(x, y + 10);
+    t.print(value);
+    t.setTextSize(1);
+    return y + 10 + 24;
+}
+
+void drawTraffic(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    t.setTextSize(1);
+    const int lh = t.fontHeight() + 2;
+    if (!Lora::present()) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setCursor(8, top + 20);
+        t.print("no module: there is no air to watch");
+        return;
+    }
+    // The window's figures, out of the buckets rather than out of the counters,
+    // so the number on the screen and the picture under it are the same data.
+    uint32_t wf = 0, wpm = 0;
+    uint8_t  wn = 0;
+    for (uint8_t i = 0; i < s_trFilled && i < TR_WINDOW; i++) {
+        const TrBucket& b = s_tr[trBucketAt((uint8_t)(s_trFilled - 1 - i))];
+        wf += b.frames; wpm += b.permille; wn++;
+    }
+    char v1[12], v2[12], v3[12];
+    if (wn) snprintf(v1, sizeof v1, "%lu", (unsigned long)((wf * 60u) / (wn * (TR_MS / 1000))));
+    else    snprintf(v1, sizeof v1, "-");
+    if (wn) snprintf(v2, sizeof v2, "%lu.%lu%%", (unsigned long)(wpm / wn / 10), (unsigned long)((wpm / wn) % 10));
+    else    snprintf(v2, sizeof v2, "-");
+    snprintf(v3, sizeof v3, "%d", (int)Lora::stats().noiseDbm);
+    drawBigNumber(t, 8,   top, "frames/min", v1, Theme::WHITE);
+    drawBigNumber(t, 150, top, "of the air", v2, Theme::WHITE);
+    drawBigNumber(t, 280, top, "noise dBm", v3, Theme::VAPOR_PURPLE);
+
+    // One row of what LIST does, so the screen is visibly live.
+    const int liveY = top + 10 + 24 + 4;
+    Lora::Packet pk;
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setCursor(6, liveY);
+    if (Lora::packetAt(0, pk)) {
+        char sum[96], age[8], line[128];
+        Lora::summary(pk, sum, sizeof sum);
+        ageText(now, pk.ms, age, sizeof age);
+        snprintf(line, sizeof line, "last %4s  %-4s %4d dBm  %.44s", age, Lora::protoShort(pk.proto),
+                 (int)pk.rssi, sum);
+        t.setTextColor((pk.flags & Lora::PK_CRC_ERR) ? Theme::RED : protoColor(pk.proto), Theme::BG);
+        t.print(line);
+    } else {
+        t.print("nothing heard yet");
+    }
+
+    // The graph. Two series in one box, told apart the way the SWEEP spectrum
+    // tells its hold from its live reading: the dim column behind is how much of
+    // the listening time was occupied, the bright tick in front is how many
+    // frames landed. Never averaged into one figure -- one long frame and six
+    // short ones are different air.
+    const int gy = liveY + lh + 2;
+    // 26, not 30: the right-hand scale label sits at gx + gw + 4, and at
+    // "25.5%" that is five characters, which needs to end inside 400.
+    const int gx = 26, gw = TR_BUCKETS * 4;
+    const int gh = bottom - gy - 12;
+    if (gh < 24) return;
+    // Both scales have a floor, and that is the honest part. Autoscaling to
+    // whatever the busiest bucket held would draw one frame on a silent band as
+    // a full-height column and a quiet afternoon as a crisis.
+    //
+    // Six frames: at SF8/62.5 kHz -- the profile this board listens on -- a
+    // short frame is a couple of hundred milliseconds of air, so a two-second
+    // bucket cannot hold many more than that anyway.
+    // Ten per-mille: 1 % is the duty-cycle ceiling most of the 868 MHz
+    // sub-bands are regulated at, which makes it the natural full scale for
+    // received air.
+    uint8_t maxF = 6, maxPm = 10;
+    for (uint8_t i = 0; i < s_trFilled; i++) {
+        const TrBucket& b = s_tr[trBucketAt(i)];
+        if (b.frames > maxF) maxF = b.frames;
+        if (b.permille > maxPm) maxPm = b.permille;
+    }
+    t.drawRect(gx - 1, gy, gw + 2, gh + 2, Theme::PURPLE);
+    for (uint8_t i = 0; i < s_trFilled; i++) {
+        const TrBucket& b = s_tr[trBucketAt(i)];
+        const int x = gx + i * 4;
+        if (b.permille) {
+            int hh = (int)b.permille * gh / maxPm;
+            if (hh < 1) hh = 1;
+            t.fillRect(x, gy + 1 + gh - hh, 4, hh, Theme::VAPOR_PURPLE);
+        }
+        if (b.frames) {
+            int hh = (int)b.frames * gh / maxF;
+            if (hh < 1) hh = 1;
+            t.fillRect(x + 1, gy + 1 + gh - hh, 2, hh, Theme::CYAN);
+        }
+    }
+    char lab[16];
+    t.setTextSize(1);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    snprintf(lab, sizeof lab, "%uf", (unsigned)maxF);
+    printRight(t, gx - 3, gy, lab);
+    t.setCursor(gx - 3 - t.textWidth("0"), gy + gh - t.fontHeight()); t.print("0");
+    t.setTextColor(Theme::VAPOR_PURPLE, Theme::BG);
+    snprintf(lab, sizeof lab, "%u.%u%%", (unsigned)(maxPm / 10), (unsigned)(maxPm % 10));
+    t.setCursor(gx + gw + 4, gy); t.print(lab);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    snprintf(lab, sizeof lab, "-%us", (unsigned)(s_trFilled * (TR_MS / 1000)));
+    t.setCursor(gx, gy + gh + 4); t.print(lab);
+    printRight(t, gx + gw, gy + gh + 4, "now");
+    if (!s_trFilled) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setCursor(gx + 8, gy + gh / 2);
+        t.print("filling: one column every two seconds");
+    }
+}
+
+// ---- SURVEY: the antenna test ----------------------------------------------
+//
+// The screen the whole phase is for, and it is used in one hand while the other
+// holds an antenna, walking. So: few rows, big type, the signal drawn rather
+// than tabulated, and one button the size of a thumb.
+//
+// ONLY NODES HEARD FIRST-HAND APPEAR HERE. A relayed node is not on this list at
+// all, because the signal in a relayed copy is the last repeater's link to here
+// and crediting it to the originator invents a distance. The packets a node
+// repeated are not thrown away either -- they are how that repeater's OWN row
+// gets its reading, and a repeater is a neighbour too. include/lora_nodes.h has
+// the per-network rule and include/lora_survey.h has the reasoning; this view
+// applies neither and re-derives nothing, it reads directPackets.
+//
+// THE MEASUREMENT IS NOT ON THIS SCREEN. What is here is live: who is around
+// and how loud, which is what you watch while turning the antenna. The number
+// that answers "is this antenna better" is a paired comparison of two runs and
+// lives in SURVEYCMP, because an absolute RSSI carries the other station's
+// power, antenna and distance -- so a row reading -60 next to a row reading -95
+// says nothing about the connector, and this view must not invite that reading.
+
+static const int SURVEY_ROW = 32;   // 12.2 mm: read at arm's length, hit with a thumb
+
+// The live rows, cached.
+//
+// Rebuilt when packetTotal() moves and not per redraw: the node table holds up
+// to 96 rows, walking it is the only way to find the handful heard first-hand,
+// and the numbers on those rows change only when a frame arrives. Twelve rows
+// because the premise of the feature is that direct reception at one spot is a
+// handful of stations -- the same reasoning RUN_NODES = 32 carries in
+// include/lora_survey.h -- and 384 bytes of internal RAM is what it costs.
+// Widest field first: the same members in declaration order cost 40 bytes a row
+// to alignment padding rather than 32, and twelve rows makes that 96 bytes of
+// internal RAM for nothing.
+struct LiveRow {
+    uint64_t    id;
+    uint32_t    lastMs;
+    char        tag[12];
+    int16_t     rssi;
+    uint16_t    direct;
+    Lora::Proto proto;
+    int8_t      snr4;
+};
+static const uint8_t LIVE_MAX = 12;
+LiveRow  s_live[LIVE_MAX];
+uint8_t  s_liveN = 0;
+uint32_t s_liveAt = 0;
+bool     s_liveBuilt = false;
+
+void liveForget() { s_liveN = 0; s_liveBuilt = false; s_liveAt = 0; }
+
+void liveRebuild() {
+    // THE ORDER IS THE ORDER THE NEIGHBOURS TURNED UP IN, and new ones append.
+    // A list sorted by signal reorders itself while the antenna is being turned,
+    // which is the one moment the row under the thumb must not move.
+    bool seen[LIVE_MAX];
+    memset(seen, 0, sizeof seen);
+    // Four rows a page, 416 bytes of stack. A page rather than a nodeAt per row
+    // because note() runs on the radio task inside the sniffer's mutex, so every
+    // acquisition is a chance to wait on a decoder (include/lora_sniffer.h).
+    Lora::Nodes::Node page[4];
+    const uint8_t cap = (uint8_t)(sizeof page / sizeof page[0]);
+    uint8_t from = 0, got = 0;
+    do {
+        got = Lora::nodeSnapshot(page, cap, from);
+        for (uint8_t i = 0; i < got; i++) {
+            const Lora::Nodes::Node& n = page[i];
+            if (!n.directPackets) continue;
+            uint8_t slot = LIVE_MAX;
+            for (uint8_t k = 0; k < s_liveN; k++)
+                if (s_live[k].proto == n.proto && s_live[k].id == n.id) { slot = k; break; }
+            if (slot == LIVE_MAX) {
+                if (s_liveN < LIVE_MAX) slot = s_liveN++;
+                else {
+                    // Full. The quietest row held gives way, so a louder
+                    // neighbour that turns up on the eleventh minute is not shut
+                    // out by one that has been at the noise floor all along.
+                    uint8_t worst = 0;
+                    for (uint8_t k = 1; k < s_liveN; k++)
+                        if (s_live[k].rssi < s_live[worst].rssi) worst = k;
+                    if (n.rssi <= s_live[worst].rssi) continue;
+                    slot = worst;
+                }
+            }
+            s_live[slot].proto = n.proto;
+            s_live[slot].id    = n.id;
+            memcpy(s_live[slot].tag, n.tag, sizeof s_live[slot].tag);
+            s_live[slot].rssi   = n.rssi;
+            s_live[slot].snr4   = n.snr4;
+            s_live[slot].direct = n.directPackets;
+            s_live[slot].lastMs = n.lastMs;
+            seen[slot] = true;
+        }
+        from = (uint8_t)(from + got);
+    } while (got == cap);
+    // A row whose node has been pushed out of the table -- Lora::Nodes evicts
+    // the oldest when its 96 fill -- goes, and the rest close up so the list
+    // keeps its order.
+    uint8_t keep = 0;
+    for (uint8_t k = 0; k < s_liveN; k++)
+        if (seen[k]) { if (keep != k) s_live[keep] = s_live[k]; keep++; }
+    s_liveN = keep;
+}
+
+void liveSync() {
+    const uint32_t total = Lora::packetTotal();
+    if (s_liveBuilt && total == s_liveAt) return;
+    s_liveAt = total; s_liveBuilt = true;
+    liveRebuild();
+}
+
+// The trend, drawn as columns.
+//
+// Columns and not a joined line, because the readings are not evenly spaced in
+// time -- traffic is sporadic -- and a line drawn between two of them draws a
+// walk that was never taken. The x axis is reception number, oldest at the left,
+// and the span printed beside it says how long those receptions took.
+//
+// THE SCALE HAS A FLOOR, and this is the part that matters. Autoscaling to the
+// node's own min..max would draw two decibels of thermal noise as a mountain
+// range, and an antenna that changed nothing would look dramatic. Ten decibels
+// is the smallest window the picture is drawn in: it is a factor of ten in
+// received power and the order of what a real antenna change does, so anything
+// smaller than that draws as something small. The real span is printed either
+// way, which is the same rule the console's ASCII ramp follows -- a trace with
+// no scale under it says "it went up" and nothing about by how much.
+static const int TREND_FLOOR_DB = 10;
+
+void drawTrend(TFT_eSPI& t, int x, int y, int w, int h,
+               const Lora::Survey::Sample* s, uint8_t n, char* span, size_t cap) {
+    if (!n) { snprintf(span, cap, "no trend"); return; }
+    int16_t lo = s[0].rssi, hi = s[0].rssi;
+    for (uint8_t i = 1; i < n; i++) {
+        if (s[i].rssi < lo) lo = s[i].rssi;
+        if (s[i].rssi > hi) hi = s[i].rssi;
+    }
+    char sp[14]; spanText(s[n - 1].ms - s[0].ms, sp, sizeof sp);
+    snprintf(span, cap, "%d..%d %s", (int)lo, (int)hi, sp);
+    int16_t wlo = lo, whi = hi;
+    if (whi - wlo < TREND_FLOOR_DB) {
+        const int16_t grow = (int16_t)(TREND_FLOOR_DB - (whi - wlo));
+        wlo = (int16_t)(wlo - grow / 2);
+        whi = (int16_t)(wlo + TREND_FLOOR_DB);
+    }
+    const int slots = w / 2;
+    const uint8_t first = n > slots ? (uint8_t)(n - slots) : 0;   // the newest that fit
+    int cx = x;
+    for (uint8_t i = first; i < n; i++, cx += 2) {
+        int hh = ((int)s[i].rssi - wlo) * h / (whi - wlo);
+        if (hh < 1) hh = 1;
+        if (hh > h) hh = h;
+        t.fillRect(cx, y + h - hh, 1, hh, Theme::CYAN);
+    }
+    t.drawFastHLine(x, y + h, w, Theme::PURPLE);
+}
+
+void surveyButtonBox(int w, int bottom, int& bx, int& by, int& bw, int& bh) {
+    bh = 28; bw = w - 8; bx = 4; by = bottom - bh;
+}
+
+void drawSurveyRow(TFT_eSPI& t, uint32_t now, int w, int y, const LiveRow& r, int8_t rec) {
+    Theme::drawListRowPanel(t, w, y, SURVEY_ROW);
+    const uint16_t col = protoColor(r.proto);
+    t.fillRect(4, y + 3, 4, SURVEY_ROW - 6, col);
+    // The RSSI is the number this screen exists for, so it is the biggest thing
+    // on the row: 24 logical pixels is 9 mm of digit, read at arm's length.
+    char rs[8]; snprintf(rs, sizeof rs, "%d", (int)r.rssi);
+    t.setTextSize(3);
+    t.setTextColor(Theme::WHITE, Theme::BG);
+    printRight(t, 88, y + 2, rs);
+    t.setTextSize(1);
+    t.setTextColor(col, Theme::BG);
+    t.setCursor(92, y + 18); t.print("dBm");
+    // The middle column: the name at size 2, cut to eleven characters. Eleven
+    // is what the column holds -- 11 x 12 px ends at 256, and the trend starts
+    // at 264 -- and it is also the longest a tag gets (Nodes::Node::tag is
+    // twelve bytes with its terminator). Only the hex fallback for a node heard
+    // exactly once is ever cut, and the NODES view has it in full.
+    char who[14], big[12];
+    nodeName(r.proto, r.id, r.tag, who, sizeof who);
+    snprintf(big, sizeof big, "%.11s", who);
+    t.setTextSize(2);
+    t.setTextColor(col, Theme::BG);
+    t.setCursor(124, y + 3); t.print(big);
+    char snr[10], meta[40];
+    snrText(r.snr4, snr, sizeof snr);
+    char age[8]; ageText(now, r.lastMs, age, sizeof age);
+    snprintf(meta, sizeof meta, "snr %s %ud %s", snr, (unsigned)r.direct, age);
+    t.setTextSize(1);
+    t.setTextColor(Theme::WHITE, Theme::BG);
+    t.setCursor(124, y + 21); t.print(meta);
+    // While a run is recording, how much evidence this node has given it --
+    // amber until the median is a middle reading rather than the average of two
+    // extremes, which is what EVIDENCE_MIN is (include/lora_survey.h). Right
+    // against the trend's left edge rather than after the meta, because the meta
+    // is as long as the numbers in it happen to be.
+    if (rec >= 0) {
+        Lora::Survey::NodeStats ns;
+        if (Lora::surveyRunNode((uint8_t)rec, r.proto, r.id, ns)) {
+            char f[10]; snprintf(f, sizeof f, "%uf", (unsigned)ns.frames);
+            t.setTextColor(ns.enough ? Theme::GREEN : Theme::AMBER, Theme::BG);
+            printRight(t, 258, y + 21, f);
+        }
+    }
+    // The trend: 64 readings at two pixels each is 128, which is what the right
+    // of the row has once the big number and the name have had theirs.
+    Lora::Survey::Sample tr[Lora::Survey::TREND_LEN];
+    const uint8_t n = Lora::surveyTrend(r.proto, r.id, tr, (uint8_t)Lora::Survey::TREND_LEN);
+    char span[24];
+    drawTrend(t, 264, y + 3, 128, 16, tr, n, span, sizeof span);
+    t.setTextSize(1);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    printRight(t, w - 8, y + 21, span);
+}
+
+void drawSurvey(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    t.setTextSize(1);
+    const int lh = t.fontHeight() + 2;
+    const int8_t rec = Lora::surveyRecording();
+    int bx, by, bw, bh;
+    surveyButtonBox(w, bottom, bx, by, bw, bh);
+
+    // One line for the state of the run, and which line it is depends on what
+    // the owner needs to know next.
+    char line[128];
+    uint16_t col = Theme::CYAN;
+    // Nothing here when there is no module: the status line one row up has
+    // already said so, and saying it twice reads as two different faults.
+    if (!Lora::present()) {
+        line[0] = '\0';
+    } else if (rec >= 0) {
+        Lora::Survey::Run run;
+        Lora::surveyRun((uint8_t)rec, run);
+        char span[14]; spanText(now - run.startMs, span, sizeof span);
+        if (run.hopping) {
+            // The louder fact wins the line. A hopping radio hears any one
+            // network for a fraction of its wall time, and which fraction
+            // depends on where the walk happened to be -- so this run cannot be
+            // compared with a parked one and the comparison will refuse it.
+            // The label is cut to ten characters here and nowhere else: the
+            // warning is the part of this line that must not fall off the edge.
+            snprintf(line, sizeof line, "REC \"%.10s\" %s -- HOPPING: park with LORA FOCUS", run.label, span);
+            col = Theme::AMBER;
+        } else {
+            snprintf(line, sizeof line, "REC \"%.16s\"  %s  %lu frames  %u nodes", run.label, span,
+                     (unsigned long)run.frames, (unsigned)run.nodes);
+            col = Theme::RED;
+        }
+    } else if (Lora::mode() == Lora::Mode::OFF) {
+        snprintf(line, sizeof line, "the radio is OFF -- tap the line above until it says FOCUS");
+        col = Theme::AMBER;
+    } else if (Lora::mode() != Lora::Mode::FOCUS) {
+        // THE WORD ON THE LINE ABOVE IS NOT THIS FEATURE. Lora::Mode::SURVEY is
+        // the radio walking its profile table, and the status line calls it
+        // SURVEY -- so somebody standing on this screen with "SURVEY" a row
+        // above it has every reason to think the radio is set up for what this
+        // view does. It is the exact opposite: a hopping radio hears any one
+        // network for a fraction of its wall time, so two runs taken under it
+        // are not comparable and Compare::incomparable will refuse them. The
+        // collision is named at the top of include/lora_survey.h; this is the
+        // one place on the device where it could cost a walk round the block.
+        snprintf(line, sizeof line, "mode %s: not parked on one profile -- LORA FOCUS <n> first",
+                 Lora::modeName(Lora::mode()));
+        col = Theme::AMBER;
+    } else if (const uint8_t runs = Lora::surveyRunCount()) {
+        snprintf(line, sizeof line, "%u run%s held. CMP is the measurement; LORA SURVEY LABEL names one",
+                 (unsigned)runs, runs == 1 ? "" : "s");
+    } else {
+        snprintf(line, sizeof line, "START, walk, STOP, swap the antenna, START again -- then CMP");
+    }
+    t.setTextColor(col, Theme::BG);
+    t.setCursor(6, top + 1);
+    t.print(line);
+
+    const int listTop = top + lh + 2;
+    const int listBottom = by - 4;
+    if (Lora::present()) liveSync();
+    if (!s_liveN) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setCursor(8, listTop + 6);
+        t.print(Lora::present() ? "nothing heard first-hand yet." : "");
+        if (Lora::present()) {
+            t.setTextColor(Theme::CYAN, Theme::BG);
+            t.setCursor(8, listTop + 6 + lh);
+            t.print("every NODES row with a v in its signal column is a relayed copy:");
+            t.setCursor(8, listTop + 6 + 2 * lh);
+            t.print("that reading is the repeater's link to here, not the");
+            t.setCursor(8, listTop + 6 + 3 * lh);
+            t.print("node's, so it cannot be on a list about this antenna.");
+        }
+    } else {
+        const int rows = (listBottom - listTop) / SURVEY_ROW;
+        uiClampScroll(s_scroll[(int)LoraView::SURVEY], s_liveN, listBottom - listTop, SURVEY_ROW, 1);
+        int y = listTop;
+        for (int i = s_scroll[(int)LoraView::SURVEY]; i < (int)s_liveN && y + SURVEY_ROW <= listBottom;
+             i++, y += SURVEY_ROW)
+            drawSurveyRow(t, now, w, y, s_live[i], rec);
+        Theme::drawScrollbar(t, w - 4, listTop, listBottom - listTop, s_liveN, rows,
+                             s_scroll[(int)LoraView::SURVEY]);
+    }
+
+    // 392 x 28 logical pixels: 149 x 10.7 mm. It is pressed with a thumb while
+    // the other hand is holding an antenna, and it is drawn filled while a run
+    // is recording so that the state is the button rather than a word beside it.
+    Theme::drawButton(t, bx, by, bw, bh, rec >= 0 ? "[ STOP ]" : "[ START ]", rec >= 0, 3);
+}
+
+// ---- SURVEYCMP: two runs against each other, which is the measurement ------
+
+static const int PAIR_FULL_DB = 10;
+
+// One box per run slot, across the width. Sized from Survey::RUNS rather than
+// from the four there happen to be, so the strip follows the store rather than
+// having to be found and fixed if it ever holds more.
+void cmpStripBox(int w, int top, uint8_t i, int& bx, int& by, int& bw, int& bh) {
+    const int margin = 4, gap = 4, n = (int)Lora::Survey::RUNS;
+    bw = (w - 2 * margin - (n - 1) * gap) / n;
+    bh = 30;
+    bx = margin + (int)i * (bw + gap);
+    by = top + 1;
+}
+
+// A default pair: the two most recent FINISHED runs, the older of them as A, so
+// that B is the antenna on the board now and "B BETTER" reads forwards. A run
+// still recording is not defaulted to -- its figures move while you look at them,
+// which is useful and is what the SURVEY view is for -- but it can be chosen.
+void cmpDefault() {
+    int8_t   newest = -1, second = -1;
+    uint32_t newestAt = 0, secondAt = 0;
+    for (uint8_t i = 0; i < Lora::Survey::RUNS; i++) {
+        Lora::Survey::Run r;
+        if (!Lora::surveyRun(i, r) || !r.stopMs) continue;
+        if (newest < 0 || r.stopMs > newestAt) {
+            second = newest;     secondAt = newestAt;
+            newest = (int8_t)i;  newestAt = r.stopMs;
+        } else if (second < 0 || r.stopMs > secondAt) {
+            second = (int8_t)i;  secondAt = r.stopMs;
+        }
+    }
+    s_cmpB = newest;
+    s_cmpA = second;
+}
+
+void cmpPick(uint8_t run) {
+    // Tapping a run makes it B and pushes the old B down to A, so walking the
+    // strip walks the comparison forward: the run you touched last is always the
+    // one being judged, which is the antenna currently on the connector.
+    if (s_cmpB == (int8_t)run) return;
+    s_cmpA = s_cmpB;
+    s_cmpB = (int8_t)run;
+}
+
+void drawCmpStrip(TFT_eSPI& t, uint32_t now, int w, int top) {
+    const int8_t rec = Lora::surveyRecording();
+    for (uint8_t i = 0; i < Lora::Survey::RUNS; i++) {
+        int bx, by, bw, bh;
+        cmpStripBox(w, top, i, bx, by, bw, bh);
+        Lora::Survey::Run r;
+        const bool used = Lora::surveyRun(i, r);
+        const char role = rec == (int8_t)i ? '*' : s_cmpA == (int8_t)i ? 'A' : s_cmpB == (int8_t)i ? 'B' : ' ';
+        const uint16_t col = rec == (int8_t)i ? Theme::RED
+                           : s_cmpB == (int8_t)i ? Theme::GREEN
+                           : s_cmpA == (int8_t)i ? Theme::VAPOR_PURPLE
+                           : used ? Theme::CYAN : Theme::PURPLE;
+        t.fillRect(bx, by, bw, bh, Theme::BG);
+        t.drawRect(bx, by, bw, bh, col);
+        t.setTextSize(2);
+        t.setTextColor(col, Theme::BG);
+        char c[2] = { role, '\0' };
+        t.setCursor(bx + 3, by + 3); t.print(c);
+        t.setTextSize(1);
+        char l1[20], l2[20];
+        if (!used) {
+            snprintf(l1, sizeof l1, "%u -", (unsigned)(i + 1));
+            l2[0] = '\0';
+        } else {
+            char span[14]; spanText((r.stopMs ? r.stopMs : now) - r.startMs, span, sizeof span);
+            snprintf(l1, sizeof l1, "%u %-9.9s", (unsigned)(i + 1), r.label);
+            snprintf(l2, sizeof l2, "%luf %un %s", (unsigned long)r.frames, (unsigned)r.nodes, span);
+        }
+        t.setCursor(bx + 18, by + 4);  t.print(l1);
+        t.setCursor(bx + 3,  by + 18); t.print(l2);
+    }
+}
+
+void drawPairBar(TFT_eSPI& t, int x, int y, int w, int h, int16_t dRssi) {
+    // The paired delta as a bar out of a zero line: right and green is B
+    // louder, left and red is B quieter. Ten decibels each way fills it, and a
+    // delta past that gets an arrow rather than a longer bar -- the scale is
+    // what makes two rows comparable at a glance, and a bar that grows off the
+    // end of its own scale is not a scale.
+    const int mid = x + w / 2;
+    t.drawFastVLine(mid, y, h, Theme::PURPLE);
+    int px = (int)dRssi * (w / 2) / PAIR_FULL_DB;
+    const bool over = px > w / 2 || px < -(w / 2);
+    if (px > w / 2)  px = w / 2;
+    if (px < -(w / 2)) px = -(w / 2);
+    const uint16_t col = dRssi > 0 ? Theme::GREEN : dRssi < 0 ? Theme::RED : Theme::CYAN;
+    if (px > 0)      t.fillRect(mid + 1, y + 1, px, h - 2, col);
+    else if (px < 0) t.fillRect(mid + px, y + 1, -px, h - 2, col);
+    if (over) {
+        t.setTextSize(1);
+        t.setTextColor(col, Theme::BG);
+        t.setCursor(dRssi > 0 ? x + w - 6 : x, y);
+        t.print(dRssi > 0 ? ">" : "<");
+    }
+}
+
+void drawSurveyCmp(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    t.setTextSize(1);
+    const int lh = t.fontHeight() + 2;
+    if (s_cmpA < 0 || s_cmpB < 0) cmpDefault();
+    drawCmpStrip(t, now, w, top);
+    int y = top + 32 + 2;
+
+    if (Lora::surveyRunCount() < 2 || s_cmpA < 0 || s_cmpB < 0) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setCursor(8, y + 4);
+        t.print("two finished runs are needed: this is a PAIRED measurement.");
+        t.setTextColor(Theme::CYAN, Theme::BG);
+        t.setCursor(8, y + 4 + lh);
+        t.print("an absolute RSSI carries the other station's power, antenna and");
+        t.setCursor(8, y + 4 + 2 * lh);
+        t.print("distance, so the same node compared against itself across");
+        t.setCursor(8, y + 4 + 3 * lh);
+        t.print("two runs is the only thing that measures the connector.");
+        t.setCursor(8, y + 4 + 5 * lh);
+        t.print("SURVEY: START, walk, STOP. Swap the antenna. START, walk, STOP.");
+        t.setCursor(8, y + 4 + 6 * lh);
+        t.print("Then tap two runs above -- the last one tapped is B.");
+        return;
+    }
+
+    Lora::Survey::Compare c;
+    if (!Lora::surveyCompare((uint8_t)s_cmpA, (uint8_t)s_cmpB, c)) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setCursor(8, y + 4);
+        t.print("no such pair of runs");
+        return;
+    }
+    // The verdict in one glance, and the dB figure ONLY where it means
+    // something. V_BETTER and V_WORSE are the two verdicts that rest on the
+    // median delta, so those get the number in 24-pixel type beside the word.
+    // TOO THIN, UNEVEN RUNS, MIXED and NO DATA do not: "+3 dB" that large next
+    // to "TOO THIN" is exactly the reading this feature exists to prevent. The
+    // number is still in the evidence line under it for anyone who wants it.
+    const uint16_t vcol = c.verdict == Lora::Survey::V_BETTER ? Theme::GREEN
+                        : c.verdict == Lora::Survey::V_WORSE  ? Theme::RED
+                        : c.verdict == Lora::Survey::V_SAME   ? Theme::CYAN
+                        : c.verdict == Lora::Survey::V_NO_DATA ? Theme::VAPOR_PURPLE
+                                                               : Theme::AMBER;
+    t.setTextSize(3);
+    t.setTextColor(vcol, Theme::BG);
+    t.setCursor(6, y);
+    t.print(Lora::surveyVerdictText(c.verdict));
+    if (c.verdict == Lora::Survey::V_BETTER || c.verdict == Lora::Survey::V_WORSE) {
+        char db[12]; snprintf(db, sizeof db, "%+d dB", (int)c.medDRssi);
+        t.setTextColor(Theme::WHITE, Theme::BG);
+        printRight(t, w - 6, y, db);
+    }
+    y += 26;
+
+    // The evidence, always, in words -- the function exists so that no caller
+    // can forget to print it (include/lora_survey.h).
+    char words[200];
+    Lora::surveyVerdictLine(c, words, sizeof words);
+    t.setTextSize(1);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    const int cols = (w - 12) / 6;
+    int lines = 0;
+    for (const char* p = words; *p && lines < 3; lines++) {
+        int n = (int)strlen(p); if (n > cols) n = cols;
+        if (n == cols) { int k = n; while (k > cols / 2 && p[k] != ' ') k--; if (k > cols / 2) n = k; }
+        char seg[80]; if (n > (int)sizeof seg - 1) n = (int)sizeof seg - 1;
+        memcpy(seg, p, (size_t)n); seg[n] = '\0';
+        t.setCursor(6, y); t.print(seg); y += lh;
+        p += n; while (*p == ' ') p++;
+    }
+    y += 2;
+
+    // The rows behind the figure, biggest improvement first. A row whose
+    // evidence is thin on either side is SHOWN and says so instead of carrying a
+    // confident bar: three frames from one node is a reading, not a measurement.
+    const int rh = rowH(t);
+    Lora::Survey::Pair pr[4];
+    int& scroll = s_scroll[(int)LoraView::SURVEYCMP];
+    if (scroll < 0) scroll = 0;
+    uint8_t from = (uint8_t)scroll, drawn = 0;
+    bool hitEnd = false;
+    while (y + rh <= bottom) {
+        const uint8_t got = Lora::surveyPairs((uint8_t)s_cmpA, (uint8_t)s_cmpB, pr,
+                                              (uint8_t)(sizeof pr / sizeof pr[0]), from);
+        if (!got) { hitEnd = true; break; }
+        for (uint8_t i = 0; i < got && y + rh <= bottom; i++, y += rh, drawn++) {
+            const Lora::Survey::Pair& p = pr[i];
+            Theme::drawListRowPanel(t, w, y, rh);
+            char who[16]; nodeName(p.proto, p.id, p.tag, who, sizeof who);
+            const int ty = y + (rh - t.fontHeight()) / 2;
+            t.setTextSize(1);
+            t.setTextColor(p.enough ? protoColor(p.proto) : Theme::AMBER, Theme::BG);
+            t.setCursor(8, ty); t.print(who);
+            char db[12], fr[16];
+            snprintf(db, sizeof db, "%+d dB", (int)p.dRssi);
+            snprintf(fr, sizeof fr, "%u/%u", (unsigned)p.framesA, (unsigned)p.framesB);
+            printRight(t, 170, ty, db);
+            if (p.enough) drawPairBar(t, 180, y + 4, 160, rh - 8, p.dRssi);
+            else { t.setTextColor(Theme::AMBER, Theme::BG); t.setCursor(184, ty); t.print("thin"); }
+            t.setTextColor(Theme::WHITE, Theme::BG);
+            printRight(t, w - 8, ty, fr);
+        }
+        from = (uint8_t)(from + got);
+        if (got < (uint8_t)(sizeof pr / sizeof pr[0])) { hitEnd = true; break; }
+    }
+    easeBack(scroll, hitEnd, bottom - y);
+    if (!drawn) {
+        t.setTextColor(Theme::AMBER, Theme::BG);
+        t.setCursor(8, y + 2);
+        t.print("no node appears in both runs");
+    }
+}
+
+// ---- PICK: the grid that reaches everything --------------------------------
+//
+// Nine boxes of 125 x 56 logical pixels -- 47 x 21 mm each -- so no target on
+// this screen is ever the problem again, and every view is on the glass at once
+// with a live figure under its name. That is the answer to "how are ten views
+// reached without burying any of them": not a ring of buttons that names its
+// neighbours, which for ten views is five taps wide and tells you nothing about
+// the other eight, but one tap to see them all and one more to arrive.
+
+struct PickCell {
+    const char* name;
+    LoraView    view;
+    bool        adverts;    // LIST with the MeshCore-advert filter on
+    bool        msgAll;     // CHANMSG across every channel at once
+};
+const PickCell PICKS[9] = {
+    { "FRAMES",   LoraView::LIST,      false, false },
+    { "ADVERTS",  LoraView::LIST,      true,  false },
+    { "TRAFFIC",  LoraView::TRAFFIC,   false, false },
+    { "NODES",    LoraView::NODES,     false, false },
+    { "CHANNELS", LoraView::CHANS,     false, false },
+    { "MESSAGES", LoraView::CHANMSG,   false, true  },
+    { "SURVEY",   LoraView::SURVEY,    false, false },
+    { "COMPARE",  LoraView::SURVEYCMP, false, false },
+    { "STATS",    LoraView::STATS,     false, false },
+};
+
+void pickBox(int w, int top, int bottom, uint8_t i, int& bx, int& by, int& bw, int& bh) {
+    const int mx = 6, my = 2, gx = 6, gy = 4;
+    bw = (w - 2 * mx - 2 * gx) / 3;
+    bh = (bottom - top - 2 * my - 2 * gy) / 3;
+    bx = mx + (int)(i % 3) * (bw + gx);
+    by = top + my + (int)(i / 3) * (bh + gy);
+}
+
+// The figure under each name, which is the whole reason the picker beats a ring
+// of buttons: it says what is behind a door before the door is opened.
+void pickSub(uint8_t i, char* out, size_t cap) {
+    switch (i) {
+        case 0: snprintf(out, cap, "%u in the ring", (unsigned)Lora::packetCount()); break;
+        case 1: snprintf(out, cap, "MeshCore only"); break;
+        case 2: snprintf(out, cap, "rate and air"); break;
+        case 3: snprintf(out, cap, "%u heard", (unsigned)Lora::nodeCount()); break;
+        case 4: snprintf(out, cap, "%u keys", (unsigned)Lora::channelRowCount()); break;
+        case 5: snprintf(out, cap, "%u held", (unsigned)Lora::msgCount()); break;
+        case 6: {
+            const int8_t rec = Lora::surveyRecording();
+            if (rec >= 0) snprintf(out, cap, "RECORDING");
+            else          snprintf(out, cap, "%u direct", (unsigned)s_liveN);
+            break;
+        }
+        case 7: {
+            const uint8_t n = Lora::surveyRunCount();
+            if (n < 2) snprintf(out, cap, "needs 2 runs");
+            else       snprintf(out, cap, "%u runs", (unsigned)n);
+            break;
+        }
+        default: snprintf(out, cap, "noise %d dBm", (int)Lora::stats().noiseDbm); break;
+    }
+}
+
+void drawPick(TFT_eSPI& t, int w, int top, int bottom) {
+    for (uint8_t i = 0; i < 9; i++) {
+        int bx, by, bw, bh;
+        pickBox(w, top, bottom, i, bx, by, bw, bh);
+        const PickCell& c = PICKS[i];
+        const bool here = c.view == s_under && c.adverts == s_adverts &&
+                          (c.view != LoraView::CHANMSG || c.msgAll == s_msgAll);
+        // The survey is the one cell that changes colour on its own: a run
+        // recording is a state the owner must be able to see from the picker,
+        // because forgetting to STOP is how two runs become one.
+        const bool hot = i == 6 && Lora::surveyRecording() >= 0;
+        const uint16_t edge = hot ? Theme::RED : here ? Theme::CYAN : Theme::PURPLE;
+        t.fillRect(bx, by, bw, bh, here ? Theme::PURPLE : Theme::BG);
+        t.drawRect(bx, by, bw, bh, edge);
+        if (hot) t.drawRect(bx + 1, by + 1, bw - 2, bh - 2, edge);
+        const uint16_t fg = here ? Theme::labelOn(Theme::PURPLE) : hot ? Theme::RED : Theme::CYAN;
+        t.setTextSize(2);
+        t.setTextColor(fg, here ? Theme::PURPLE : Theme::BG);
+        t.setCursor(bx + (bw - t.textWidth(c.name)) / 2, by + bh / 2 - 14);
+        t.print(c.name);
+        char sub[24];
+        pickSub(i, sub, sizeof sub);
+        t.setTextSize(1);
+        t.setTextColor(here ? Theme::labelOn(Theme::PURPLE) : Theme::WHITE, here ? Theme::PURPLE : Theme::BG);
+        t.setCursor(bx + (bw - t.textWidth(sub)) / 2, by + bh / 2 + 8);
+        t.print(sub);
+    }
+}
+
+// ---- STATS -----------------------------------------------------------------
 
 int statLine(TFT_eSPI& t, int y, uint16_t col, const char* label, const char* text) {
     t.setTextColor(col, Theme::BG);
@@ -478,11 +1752,29 @@ void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     }
 }
 
+void openView(LoraView v, bool adverts, bool msgAll) {
+    s_adverts = adverts;
+    if (v == LoraView::CHANMSG) { s_msgAll = msgAll; s_scroll[(int)LoraView::CHANMSG] = 0; }
+    if (v == LoraView::LIST) { advForget(); s_scroll[(int)LoraView::LIST] = 0; }
+    s_view = v;
+}
+
 }
 
 void uiLoraInit(TFT_eSPI& t, LoraView v) {
     t.fillRect(0, 0, t.width(), t.height(), Theme::BG);
-    s_view = v == LoraView::PACKET ? LoraView::LIST : v;   // PACKET needs a frame chosen first
+    // PACKET needs a frame chosen first, CHANMSG a channel, and the picker
+    // something to cover.
+    s_view = (v == LoraView::PACKET || v == LoraView::CHANMSG || v == LoraView::PICK || v >= LoraView::COUNT)
+             ? LoraView::LIST : v;
+    s_under = s_view;
+    s_adverts = false;
+    s_msgAll  = false;
+    advForget();
+    liveForget();
+    // The traffic history starts over with the screen, because a monitor that
+    // draws the minutes it was not watching as quiet air is lying.
+    trafficReset();
 }
 
 LoraView uiLoraView() { return s_view; }
@@ -493,31 +1785,57 @@ void uiLoraScroll(int delta) {
     if (s < 0) s = 0;
 }
 
+int uiLoraDragStep(TFT_eSPI& t) {
+    return s_view == LoraView::SURVEY ? SURVEY_ROW : rowH(t);
+}
+
 void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool advance) {
     (void)eng; (void)advance;
     const int w = t.width(), h = t.height();
-    const Bar b = bar(w, h);
-    const int bottom = b.y - 4;
+    const int bottom = bodyBottom(w, h);
     t.fillRect(0, BODY_TOP, w, bottom - BODY_TOP, Theme::BG);
-    char title[32];
+    // Every view, not just TRAFFIC: a monitor that only counts while it is the
+    // one showing opens with an empty graph every time.
+    trafficTick(now);
+    // Likewise the survey's live rows. It costs a walk of the node table per
+    // frame RECEIVED (liveSync gates on packetTotal, not on the redraw), and it
+    // buys two things: the picker's SURVEY cell can say how many stations are
+    // heard first-hand before the view is opened, and the view opens with them
+    // already on it rather than filling in on the next frame off the air --
+    // which on a quiet band is a minute of blank screen.
+    if (Lora::present()) liveSync();
+    char title[48];
     switch (s_view) {
-        case LoraView::LIST:   snprintf(title, sizeof title, ">> LORA  (%u) <<", (unsigned)Lora::packetCount()); break;
-        case LoraView::PACKET: snprintf(title, sizeof title, ">> LORA FRAME <<"); break;
-        case LoraView::NODES:  snprintf(title, sizeof title, ">> LORA NODES  (%u) <<", (unsigned)Lora::nodeCount()); break;
-        case LoraView::CHANS:  snprintf(title, sizeof title, ">> LORA CHANNELS  (%u) <<", (unsigned)Lora::channelRowCount()); break;
-        // STATS was titled "LORA CHANNEL" -- the radio channel. With a view
-        // about crypto channels next to it that title was a trap, and the
-        // button has always said STATS.
-        default:               snprintf(title, sizeof title, ">> LORA STATS <<"); break;
+        case LoraView::LIST:
+            if (s_adverts) snprintf(title, sizeof title, ">> LORA ADVERTS <<");
+            else           snprintf(title, sizeof title, ">> LORA  (%u) <<", (unsigned)Lora::packetCount());
+            break;
+        case LoraView::NODES:
+            snprintf(title, sizeof title, ">> LORA NODES  (%u) <<", (unsigned)Lora::nodeCount()); break;
+        case LoraView::CHANS:
+            snprintf(title, sizeof title, ">> LORA CHANNELS  (%u) <<", (unsigned)Lora::channelRowCount()); break;
+        case LoraView::CHANMSG:
+            snprintf(title, sizeof title, ">> %s  (%u) <<", s_msgAll ? "ALL MESSAGES" : "CHANNEL",
+                     (unsigned)(s_msgAll ? Lora::msgCount() : Lora::msgCountFor(s_msgProto, s_msgChan))); break;
+        case LoraView::SURVEY:
+            snprintf(title, sizeof title, ">> ANTENNA SURVEY  (%u) <<", (unsigned)s_liveN); break;
+        default:
+            snprintf(title, sizeof title, ">> %s <<", viewTitle(s_view)); break;
     }
     Theme::drawTitleBar(t, title);
+    drawTitle(t, w, title);
     int top = drawStatus(t, w, BODY_TOP + 1);
     switch (s_view) {
-        case LoraView::LIST:   drawList(t, now, w, top, bottom); break;
-        case LoraView::PACKET: drawPacket(t, now, w, top, bottom); break;
-        case LoraView::NODES:  drawNodes(t, now, w, top, bottom); break;
-        case LoraView::CHANS:  drawChans(t, now, w, top, bottom); break;
-        default:               drawStats(t, now, w, top, bottom); break;
+        case LoraView::LIST:      drawList(t, now, w, top, bottom); break;
+        case LoraView::PACKET:    drawPacket(t, now, w, top, bottom); break;
+        case LoraView::NODES:     drawNodes(t, now, w, top, bottom); break;
+        case LoraView::CHANS:     drawChans(t, now, w, top, bottom); break;
+        case LoraView::CHANMSG:   drawChanMsg(t, now, w, top, bottom); break;
+        case LoraView::TRAFFIC:   drawTraffic(t, now, w, top, bottom); break;
+        case LoraView::SURVEY:    drawSurvey(t, now, w, top, bottom); break;
+        case LoraView::SURVEYCMP: drawSurveyCmp(t, now, w, top, bottom); break;
+        case LoraView::PICK:      drawPick(t, w, top, bottom); break;
+        default:                  drawStats(t, now, w, top, bottom); break;
     }
     drawBar(t, w, h);
     Theme::drawToast(t, now);
@@ -525,68 +1843,171 @@ void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adva
 
 LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
     const Bar b = bar(screenW, screenH);
+    const int bottom = bodyBottom(screenW, screenH);
+    t.setTextSize(1);
+
+    // ---- the bar
     if (y >= b.y && y <= b.y + b.h) {
         int which = -1;
         for (int i = 0; i < 3; i++) if (x >= b.x[i] && x <= b.x[i] + b.w) which = i;
         if (which < 0) return LoraTap::NONE;
+        const char* l[3]; barLabels(l);
+        if (!l[which]) return LoraTap::NONE;
         if (which == 0) {
-            if (s_view == LoraView::PACKET) { s_view = LoraView::LIST; return LoraTap::HANDLED; }
+            // BACK goes up one level where there is one, and off the screen
+            // where there is not.
+            switch (s_view) {
+                case LoraView::PACKET:    s_view = LoraView::LIST;   return LoraTap::HANDLED;
+                case LoraView::CHANMSG:   s_view = LoraView::CHANS;  return LoraTap::HANDLED;
+                case LoraView::SURVEYCMP: s_view = LoraView::SURVEY; return LoraTap::HANDLED;
+                case LoraView::PICK:      s_view = s_under;          return LoraTap::HANDLED;
+                default: break;
+            }
             return LoraTap::BACK;
         }
-        switch (s_view) {
-            case LoraView::PACKET: {
-                // < is towards the newer frame, > the older, in the list's order.
-                const uint32_t total = Lora::packetTotal();
-                uint32_t idx = s_open + (total - s_openTotal);
-                if (which == 1 && idx > 0) idx--;
-                if (which == 2 && idx + 1 < Lora::packetCount()) idx++;
-                s_open = (uint16_t)idx; s_openTotal = total;
-                break;
-            }
-            default: s_view = cycleStep(s_view, which == 1 ? -1 : +1); break;
+        if (s_view == LoraView::PACKET) {
+            // < is towards the newer frame, > the older, in the list's order.
+            const uint32_t total = Lora::packetTotal();
+            uint32_t idx = s_open + (total - s_openTotal);
+            if (which == 1 && idx > 0) idx--;
+            if (which == 2 && idx + 1 < Lora::packetCount()) idx++;
+            s_open = (uint16_t)idx; s_openTotal = total;
+            return LoraTap::HANDLED;
         }
+        if (which == 1) { s_under = s_view; s_view = LoraView::PICK; return LoraTap::HANDLED; }
+        if (s_view == LoraView::SURVEY) { s_view = LoraView::SURVEYCMP; return LoraTap::HANDLED; }
+        openView(LoraView::SURVEY, false, false);
         return LoraTap::HANDLED;
     }
-    // The status line cycles the mode: OFF, FOCUS, SURVEY, SWEEP. The
-    // first three are the setting; SWEEP is for now and is not kept.
-    t.setTextSize(1);
-    if (Lora::present() && y >= BODY_TOP && y < BODY_TOP + 1 + t.fontHeight() + 3) {
+
+    if (y < BODY_TOP) return LoraTap::NONE;
+
+    // ---- the picker, which owns its whole body
+    if (s_view == LoraView::PICK) {
+        const int top = statusBottom(t);
+        for (uint8_t i = 0; i < 9; i++) {
+            int bx, by, bw, bh;
+            pickBox(screenW, top, bottom, i, bx, by, bw, bh);
+            if (x < bx || x > bx + bw || y < by || y > by + bh) continue;
+            openView(PICKS[i].view, PICKS[i].adverts, PICKS[i].msgAll);
+            return LoraTap::HANDLED;
+        }
+        return LoraTap::NONE;
+    }
+
+    // ---- the status line cycles the radio's mode: OFF, FOCUS, SURVEY, SWEEP.
+    // The first three are the setting; SWEEP is for now and is not kept.
+    if (y < statusBottom(t)) {
+        if (!Lora::present()) return LoraTap::NONE;
+        // Not while an antenna run is recording. Walking the profiles or
+        // sweeping the band mid-run would make the run's frame counts mean
+        // something different from the run it is going to be compared with --
+        // and the mode is one tap away from every view, including the survey's.
+        if (Lora::surveyRecording() >= 0) {
+            Theme::showToast("RUN RECORDING", "the radio stays put -- STOP the run first", Theme::AMBER);
+            return LoraTap::HANDLED;
+        }
         const uint8_t next = (uint8_t)(((uint8_t)Lora::mode() + 1) % (uint8_t)Lora::Mode::COUNT);
         Lora::setMode((Lora::Mode)next);
         if (next < 3) { while (Settings::loraMode() != next) Settings::cycleLoraMode(); }
         return LoraTap::HANDLED;
     }
-    if (s_view == LoraView::CHANS && y >= BODY_TOP) {
-        const int rh = rowH(t);
-        t.setTextSize(1);
-        const int lh = t.fontHeight() + 2;
-        // The same arithmetic drawChans() lays the rows out with: the status
-        // line, then the count line, then the list.
-        const int listTop = BODY_TOP + 1 + t.fontHeight() + 3 + lh + 2;
-        if (y < listTop) return LoraTap::NONE;
-        const int row = s_scroll[(int)LoraView::CHANS] + (y - listTop) / rh;
-        Lora::ChannelRow r;
-        if (row >= 0 && Lora::channelRow((uint8_t)row, r)) {
-            if (Lora::toggleChannelRow((uint8_t)row))
-                Theme::showToast(r.enabled ? "MUTED" : "LISTENING", r.name,
-                                 r.enabled ? Theme::VAPOR_PURPLE : Theme::CYAN);
-            else
-                Theme::showToast("BUILT IN", "stays on -- yours go in over LORA CHAN", Theme::AMBER);
+
+    const int top = statusBottom(t);
+    const int rh  = rowH(t);
+
+    // ---- the survey: one button, and the rows are read rather than tapped
+    if (s_view == LoraView::SURVEY) {
+        int bx, by, bw, bh;
+        surveyButtonBox(screenW, bottom, bx, by, bw, bh);
+        if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
+            if (Lora::surveyRecording() >= 0) {
+                if (Lora::surveyStop()) Theme::showToast("RUN STOPPED", "swap the antenna and START again", Theme::CYAN);
+            } else if (Lora::surveyStart("") >= 0) {
+                // The label is left to start() to fill in ("run 3"): a panel
+                // with no keyboard cannot type "dipole at the balcony rail",
+                // and LORA SURVEY LABEL <text> on the console renames the run
+                // that is recording. Saying so beats an on-screen keyboard
+                // nobody can hit.
+                Theme::showToast("RECORDING", "walk, then STOP. LORA SURVEY LABEL names it", Theme::RED);
+            } else {
+                Theme::showToast("NO STORE", "there was no PSRAM for the survey at boot", Theme::AMBER);
+            }
             return LoraTap::HANDLED;
         }
         return LoraTap::NONE;
     }
-    if (s_view == LoraView::LIST && y >= BODY_TOP) {
-        const int rh = rowH(t);
-        t.setTextSize(1);
-        const int top = BODY_TOP + 1 + t.fontHeight() + 3;
-        if (y < top) return LoraTap::NONE;
-        const int row = s_scroll[0] + (y - top) / rh;
-        if (row < (int)Lora::packetCount()) {
-            s_open = (uint16_t)row; s_openTotal = Lora::packetTotal();
-            s_view = LoraView::PACKET;
+
+    // ---- the comparison: the strip chooses which two runs
+    if (s_view == LoraView::SURVEYCMP) {
+        for (uint8_t i = 0; i < Lora::Survey::RUNS; i++) {
+            int bx, by, bw, bh;
+            cmpStripBox(screenW, top, i, bx, by, bw, bh);
+            if (x < bx || x > bx + bw || y < by || y > by + bh) continue;
+            Lora::Survey::Run r;
+            if (!Lora::surveyRun(i, r)) {
+                Theme::showToast("EMPTY SLOT", "SURVEY: START begins a run here", Theme::AMBER);
+                return LoraTap::HANDLED;
+            }
+            cmpPick(i);
+            s_scroll[(int)LoraView::SURVEYCMP] = 0;
             return LoraTap::HANDLED;
         }
+        return LoraTap::NONE;
+    }
+
+    // ---- a channel's messages: the mute toggle
+    if (s_view == LoraView::CHANMSG) {
+        if (!s_msgAll) {
+            int bx, by, bw, bh;
+            msgMuteBox(screenW, top, bx, by, bw, bh);
+            if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
+                Lora::ChannelRow r;
+                uint8_t row = 0;
+                if (!findChanRow(s_msgProto, s_msgChan, row, r)) return LoraTap::NONE;
+                if (Lora::toggleChannelRow(row))
+                    Theme::showToast(r.enabled ? "MUTED" : "LISTENING", r.name,
+                                     r.enabled ? Theme::VAPOR_PURPLE : Theme::CYAN);
+                else
+                    Theme::showToast("BUILT IN", "stays on -- yours go in over LORA CHAN", Theme::AMBER);
+                return LoraTap::HANDLED;
+            }
+        }
+        return LoraTap::NONE;
+    }
+
+    // ---- the channel list: a tap reads the channel
+    if (s_view == LoraView::CHANS) {
+        const int listTop = chansListTop(t);
+        if (y < listTop) return LoraTap::NONE;
+        const int row = s_scroll[(int)LoraView::CHANS] + (y - listTop) / rh;
+        Lora::ChannelRow r;
+        if (row < 0 || !Lora::channelRow((uint8_t)row, r)) return LoraTap::NONE;
+        Lora::Proto p; uint8_t idx;
+        if (!Lora::channelRowKey((uint8_t)row, p, idx)) return LoraTap::NONE;
+        s_msgProto = p; s_msgChan = idx;
+        openView(LoraView::CHANMSG, false, false);
+        return LoraTap::HANDLED;
+    }
+
+    // ---- the frame list: a tap opens the frame
+    if (s_view == LoraView::LIST) {
+        const int vrow = (y - top) / rh;
+        if (vrow < 0) return LoraTap::NONE;
+        if (s_adverts) {
+            // The filter's rows are ring positions found at s_advAt frames, and
+            // PACKET tracks its frame by exactly that pair.
+            if (vrow >= (int)s_advN) return LoraTap::NONE;
+            s_open = s_advRow[vrow];
+            s_openTotal = s_advAt;
+        } else {
+            const int row = s_scroll[0] + vrow;
+            if (row >= (int)Lora::packetCount()) return LoraTap::NONE;
+            s_open = (uint16_t)row;
+            s_openTotal = Lora::packetTotal();
+        }
+        s_view = LoraView::PACKET;
+        return LoraTap::HANDLED;
     }
     return LoraTap::NONE;
 }

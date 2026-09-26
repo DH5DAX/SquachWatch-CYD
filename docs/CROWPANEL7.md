@@ -50,6 +50,7 @@ full reasoning.
 | Function | Configuration |
 | --- | --- |
 | Display | 800×480 RGB565 parallel, DE 42 / VSYNC 41 / HSYNC 40 / PCLK 39, porches 8/4/8 both axes, 16 MHz pixel clock (18 MHz and up run away on this core) |
+| Pixel pitch | 800×480 over a 7.0" diagonal is 933 px of diagonal and so **133 px/inch — 0.1905 mm a physical pixel**, on 152.4 × 91.4 mm of glass. The default logical canvas is 400×240 blitted doubled (`SQW_LOGICAL_W`), so **one logical pixel is 0.381 mm**: a 20-px row is 7.6 mm and a 14-px one is 5.3 mm. Derived from the diagonal and the resolution, not measured off the panel; it is the figure every touch target on this board is sized against |
 | Data lines | B0..B4 = 21, 47, 48, 45, 38; G0..G5 = 9, 10, 11, 12, 13, 14; R0..R4 = 7, 17, 18, 3, 46 |
 | Touch | GT911 at 0x5D on I2C SDA 15 / SCL 16; INT on GPIO1 (also its address strap); points read from 0x814F |
 | Backlight | none on a GPIO: a byte to the STC8H1K28 helper at 0x30, 0 brightest … 244 dimmest, 245 off |
