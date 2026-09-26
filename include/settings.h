@@ -264,19 +264,28 @@ namespace Settings {
     void        setLoraFocus(uint8_t ix);
 
     // ONLINE LOOKUPS: whether this board may ask a public service about a node
-    // it heard. Three switches, not one, because a master alone cannot say
+    // it heard. Four switches, not one, because a master alone cannot say
     // "aircraft yes, callsigns no" -- which is the setting a careful operator
-    // actually wants. All three default OFF, and that is the one place this
+    // actually wants. All four default OFF, and that is the one place this
     // differs in shape from updateCheck() below: that switch talks to
     // first-party infrastructure about THIS board and defaults ON, these talk
     // to third parties about OTHER PEOPLE. What each one sends, and the
     // measured harm behind the default, is in include/lora_enrich.h.
+    //
+    // The fourth is a different KIND of request and still defaults off. The
+    // MeshCore adverts feed sends a row count and nothing else -- no key, no
+    // prefix, no name, nothing about what this board heard (include/lora_feed.h)
+    // -- so it is the one source here that cannot betray anything even in
+    // principle. It is off by default anyway: this board does not join a
+    // network unasked, whatever the request would have said.
     bool        loraLookups();           // the master
     void        toggleLoraLookups();
     bool        loraLookupCall();        // hamrig.com, for APRS and MeshCom callsigns
     void        toggleLoraLookupCall();
     bool        loraLookupOgn();         // the OGN device database, for FANET
     void        toggleLoraLookupOgn();
+    bool        loraLookupFeed();        // meshcore.df0x.de recent adverts, to name MeshCore rows
+    void        toggleLoraLookupFeed();
 
     // The channel keys the two mesh decoders hold, as one opaque blob. The
     // record format is Lora::Chan's business (include/lora_channels.h); this

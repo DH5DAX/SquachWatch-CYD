@@ -168,17 +168,98 @@ bool save() {
 // this table is a list of names and not a list of keys -- see the header.
 //
 // #test and #ping were that bench session's own and are deliberately not here:
-// a group is a thing to carry into the field.
+// a group is a thing to carry into the field. They are in BENCH below.
 static const char* const GROUP_NRW[] = {
     "#wardriving", "#hamradio", "#nrw", "#bochum", "#dortmund", "#essen",
     "#gelsenkirchen", "#muenster", "#muensterland", "#darc-i21", "#rheine",
 };
 
+// The rest come from ONE measured source: meshcore.df0x.de/api/init, read on
+// 2026-09-26, whose `radarChannels` array is forty names -- "Public" and
+// thirty-nine hashtags. That is the list the club's own visualiser watches, so
+// it is the list with traffic on it, and every entry below is copied from that
+// response rather than typed from a page. test/lora_channels_test.cpp holds the
+// same forty names independently and asserts that each one lands in a group and
+// that its derived hash is the expected byte -- because a mistyped tag is not an
+// error, it is a different channel that quietly hears nothing for ever.
+//
+// WHY THEY ARE SPLIT UP AT ALL. MeshCore::maxUserChannels() is 24 and these are
+// 39 tags, 49 with NRW's. They were never going to fit in one group, so the cut
+// is made where it is useful rather than where it is arithmetically neat: a
+// board goes out with a place and a purpose, and "Braunschweig plus Kiel plus
+// Berlin" is a posture. Two groups fit comfortably (NRW's eleven and NET's ten
+// is 21 of 24); three usually do not, and LORA CHAN GROUP says so with the
+// number of free slots when it runs out.
+//
+// The hashes are NOT in this table. A group is a list of tags and the tag is the
+// key (SHA256("#tag")[:16], hash SHA256(key)[0]); writing a hash down here would
+// be writing down a derivation this file deliberately does not perform. The test
+// pins them.
+
+// "Public" from radarChannels is NOT here, and this is the trap in that list:
+// the built-in Public channel has the fixed key 8b3387e9c5cdea6ac9e5edbaa115cd72
+// (docs/LORA.md section 3.2), while the hashtag "#public" in the same array
+// derives 8b4b705b080c0d943b1c80f6b3ef6b6d -- a completely different channel that
+// happens to share two leading hex digits. Public is built in and always on;
+// #public is an ordinary hashtag and lives in NET.
+
+// The owner's own bench channels, back where they can be typed in one word.
+static const char* const GROUP_BENCH[] = { "#test", "#ping", "#testing" };
+
+// German regional groups from the radar list. #sh is Schleswig-Holstein,
+// #bsmesh Braunschweig, #hansemesh the Hanseatic north, #dl-mitte the middle.
+static const char* const GROUP_DE[] = {
+    "#berlin", "#hansemesh", "#dl-mitte", "#bsmesh", "#kiel", "#sh",
+};
+
+// The neighbours that speak German. #vienna is a city and #austria a country and
+// both are in the list, so both are here.
+static const char* const GROUP_AT_CH[] = { "#switzerland", "#austria", "#vienna" };
+
+// European cities outside DACH.
+static const char* const GROUP_EU[] = { "#london", "#amsterdam", "#copenhagen" };
+
+// The rest of the world in the radar list. #queens and #northeast are both New
+// York and New England; they are grouped by distance from the bench, not by
+// continent, because that is what decides whether a key is worth a slot.
+static const char* const GROUP_WORLD[] = { "#vancouver", "#thailand", "#queens", "#northeast" };
+
+// The plumbing: channels about the mesh rather than about a place. #public is
+// here, and is not the built-in Public -- see above.
+static const char* const GROUP_NET[] = {
+    "#meshcore", "#meshtastic", "#meshcorenetz", "#mesh", "#bot", "#bots",
+    "#admin", "#public", "#info", "#news",
+};
+
+// Out of the house with a radio. #wardriving is also in NRW and #wardrive is a
+// second, separate channel with a different key -- both are in the list, both
+// carry traffic, and neither is a typo for the other.
+static const char* const GROUP_FIELD[] = {
+    "#wardriving", "#wardrive", "#camping", "#weather", "#emergency", "#prepper",
+};
+
+static const char* const GROUP_SOCIAL[] = { "#chat", "#coffee", "#beer" };
+
+// #ham from the radar list, with #hamradio which NRW already holds: whichever
+// group a ham types first, they get both spellings.
+static const char* const GROUP_HAM[] = { "#ham", "#hamradio" };
+
 namespace {
 struct Group { const char* name; const char* const* tags; uint8_t n; };
+#define GROUP_ROW(nm, arr) { nm, arr, (uint8_t)(sizeof arr / sizeof arr[0]) }
 const Group GROUPS[] = {
-    { "NRW", GROUP_NRW, (uint8_t)(sizeof GROUP_NRW / sizeof GROUP_NRW[0]) },
+    GROUP_ROW("NRW",    GROUP_NRW),
+    GROUP_ROW("BENCH",  GROUP_BENCH),
+    GROUP_ROW("DE",     GROUP_DE),
+    GROUP_ROW("AT-CH",  GROUP_AT_CH),
+    GROUP_ROW("EU",     GROUP_EU),
+    GROUP_ROW("WORLD",  GROUP_WORLD),
+    GROUP_ROW("NET",    GROUP_NET),
+    GROUP_ROW("FIELD",  GROUP_FIELD),
+    GROUP_ROW("SOCIAL", GROUP_SOCIAL),
+    GROUP_ROW("HAM",    GROUP_HAM),
 };
+#undef GROUP_ROW
 const uint8_t N_GROUPS = (uint8_t)(sizeof GROUPS / sizeof GROUPS[0]);
 }  // namespace
 

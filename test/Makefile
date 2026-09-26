@@ -23,7 +23,7 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter \
             -I$(SIM) -I$(INC)
 
-TESTS := lora_airtime_test lora_ident_test lora_enrich_test lora_channels_test lora_nodes_test lora_crypto_test lora_meshtastic_test lora_meshcore_test lora_lorawan_test lora_ham_test remote_id_test ibeacon_test signatures_test emitter_roundtrip_test ignore_list_test hacker_test pwnagotchi_test shim_fidelity_test squachmesh_test qwerty_test meshmsg_test device_info_test security_test emote_script_test blackbox_test bingo_test hunt_test bgretire_test autoquiet_test framepush_test touchfit_test logindex_test dex_test regulars_test spam_test
+TESTS := lora_json_test lora_feed_test lora_airtime_test lora_ident_test lora_enrich_test lora_channels_test lora_nodes_test lora_crypto_test lora_meshtastic_test lora_meshcore_test lora_lorawan_test lora_ham_test remote_id_test ibeacon_test signatures_test emitter_roundtrip_test ignore_list_test hacker_test pwnagotchi_test shim_fidelity_test squachmesh_test qwerty_test meshmsg_test device_info_test security_test emote_script_test blackbox_test bingo_test hunt_test bgretire_test autoquiet_test framepush_test touchfit_test logindex_test dex_test regulars_test spam_test
 
 # Only the units under test get linked in. Pulling the whole firmware
 # would drag in TFT_eSPI, NimBLE and the UI, and a test that needs a
@@ -104,7 +104,15 @@ lora_ident_test_SRCS         := $(SRC)/lora_ident.cpp
 # canned transport in place of the socket. The transport is the only part of
 # that file a desktop cannot reach, which is why it is the only part behind a
 # pointer.
-lora_enrich_test_SRCS        := $(SRC)/lora_enrich.cpp
+lora_enrich_test_SRCS        := $(SRC)/lora_enrich.cpp $(SRC)/lora_json.cpp
+# The scanner that implements the allow-list for both online sources. Its own
+# test, because a fix to the escape handling has to be checkable without going
+# through a response parser to reach it.
+lora_json_test_SRCS          := $(SRC)/lora_json.cpp
+# The MeshCore adverts feed: the parser, the allow-list, the prefix a node row
+# pins down, and the ambiguous match that is the whole reason it has three
+# answers. Enrich comes along for the request log and the canned transport.
+lora_feed_test_SRCS          := $(SRC)/lora_feed.cpp $(SRC)/lora_enrich.cpp $(SRC)/lora_json.cpp
 # The node table, fed by every decoder.
 lora_nodes_test_SRCS         := $(SRC)/lora_nodes.cpp $(SRC)/lora_classify.cpp $(SRC)/lora_pkt.cpp $(SRC)/lora_profiles.cpp $(SRC)/lora_meshtastic.cpp $(SRC)/lora_meshcore.cpp $(SRC)/lora_lorawan.cpp $(SRC)/lora_aprs.cpp $(SRC)/lora_fanet.cpp $(SRC)/lora_crypto.cpp
 

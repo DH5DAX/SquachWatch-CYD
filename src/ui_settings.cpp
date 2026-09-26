@@ -168,10 +168,11 @@ static const SettingsRow SYSTEM_ROWS[] = {
     // people will actually use to reach the screen, but LORA MODE and LORA
     // PROFILE are settings and settings belong on a settings page.
     SettingsRow::LORA, SettingsRow::LORA_MODE, SettingsRow::LORA_PROFILE, SettingsRow::LORA_CHANNELS,
-    // And, last of all, the three that decide whether anything about a node
+    // And, last of all, the four that decide whether anything about a node
     // leaves this board. Last because they are the rarest thing anybody
-    // changes and because the master reads as the heading of the two under it.
+    // changes and because the master reads as the heading of the three under it.
     SettingsRow::LORA_LOOKUPS, SettingsRow::LORA_LK_CALL, SettingsRow::LORA_LK_OGN,
+    SettingsRow::LORA_LK_FEED,
 #endif
 };
 static const uint8_t SYSTEM_ROWS_N = sizeof(SYSTEM_ROWS) / sizeof(SYSTEM_ROWS[0]);
@@ -246,6 +247,7 @@ static RowGroupId groupFor(SettingsRow r) {
         case SettingsRow::LORA_LOOKUPS:
         case SettingsRow::LORA_LK_CALL:
         case SettingsRow::LORA_LK_OGN:
+        case SettingsRow::LORA_LK_FEED:
             return RowGroupId::LORA;
 #endif
         case SettingsRow::RESET_STATS:
@@ -1035,6 +1037,13 @@ static void rowContent(SettingsRow r, const DetectionEngine& eng, char* valBuf, 
         case SettingsRow::LORA_LK_OGN:
             label = "  AIRCRAFT DB";
             value = (Settings::loraLookups() && Settings::loraLookupOgn()) ? "glidernet.org" : "OFF";
+            break;
+        // Named for what it fetches rather than what it looks up, because it
+        // does not look anything up: it pulls a list and the matching happens
+        // here. See include/lora_feed.h.
+        case SettingsRow::LORA_LK_FEED:
+            label = "  MC ADVERTS";
+            value = (Settings::loraLookups() && Settings::loraLookupFeed()) ? "meshcore.df0x.de" : "OFF";
             break;
 #endif
         case SettingsRow::UPDATE_FIRMWARE:

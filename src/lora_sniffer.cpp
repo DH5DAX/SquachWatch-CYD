@@ -20,6 +20,7 @@
 #include "lora_meshtastic.h"
 #include "lora_channels.h"
 #include "lora_enrich.h"
+#include "lora_feed.h"
 #include "lora_ident.h"
 #include "clock.h"
 #include "settings.h"
@@ -278,6 +279,8 @@ bool begin() {
     // The request log exists before the first request can be issued, which is
     // the point of it: an empty log is a claim the owner can check.
     Enrich::begin();
+    // The adverts table beside it. Same log, so the same claim covers both.
+    Feed::begin();
 
     // The channel keys come back BEFORE the radio is asked anything, and they
     // come back even when the radio never answers. They belong to the
@@ -358,6 +361,9 @@ static void enrichScan(uint32_t now) {
     // Read every pass, so a switch turned off takes effect on the next one and
     // not at the next reboot.
     Enrich::setSources(Settings::loraLookups(), Settings::loraLookupCall(), Settings::loraLookupOgn());
+    // The feed's switch is read on the same pass and from the same master. It
+    // has no queue to fill, so there is nothing else to do for it here.
+    Feed::setArmed(Settings::loraLookups(), Settings::loraLookupFeed());
     if (!Enrich::armed()) { s_page = 0; return; }
     if (s_lastScan && now - s_lastScan < 5000u) return;
     s_lastScan = now;
@@ -378,6 +384,9 @@ void tick(uint32_t now) {
     // Starts a short-lived worker when there is something to ask and WiFi is
     // already up for another reason; does nothing at all otherwise.
     Enrich::tick(now);
+    // And the adverts poll, which waits for that worker to finish rather than
+    // opening a second socket on a board that is deaf while either is running.
+    Feed::tick(now);
     // Print what arrived since the last pass, a few per pass at most so a
     // burst never stalls a frame.
     uint8_t budget = 4;
@@ -684,9 +693,16 @@ static bool channelConsole(const char* r) {
         if (ix < 0) { Serial.printf("[lora] no group \"%s\" -- LORA CHAN GROUP lists them\n", g); return true; }
         const uint8_t added = Chan::addGroup((uint8_t)ix);
         if (added) saveOrWarn();
-        Serial.printf("[lora] GROUP %s: %u of %u added and stored%s\n", Chan::groupName((uint8_t)ix),
+        // 49 tags across ten groups against a 24-entry table: running out is the
+        // NORMAL outcome of adding a third group, so the message says how many
+        // slots are left rather than leaving the user to guess which tags
+        // silently did not make it.
+        const uint8_t free = (uint8_t)(MeshCore::maxUserChannels() - MeshCore::userChannelCount());
+        Serial.printf("[lora] GROUP %s: %u of %u added and stored%s; %u of %u MeshCore slots free\n",
+                      Chan::groupName((uint8_t)ix),
                       (unsigned)added, (unsigned)Chan::groupSize((uint8_t)ix),
-                      added == Chan::groupSize((uint8_t)ix) ? "" : " (the rest were already held, or the table is full)");
+                      added == Chan::groupSize((uint8_t)ix) ? "" : " (the rest were already held, or the table is full)",
+                      (unsigned)free, (unsigned)MeshCore::maxUserChannels());
         return true;
     }
 
@@ -784,10 +800,20 @@ static bool channelConsole(const char* r) {
 // is. "Nothing has been sent" is a claim the owner should be able to check on a
 // board that never had a radio to hear anything with.
 static void lookupsConsole() {
-    Serial.printf("[lora] online lookups: master %s, callsign db (%s) %s, aircraft db (%s) %s\n",
+    Serial.printf("[lora] online lookups: master %s, callsign db (%s) %s, aircraft db (%s) %s, mc adverts (%s) %s\n",
                   Settings::loraLookups() ? "ON" : "OFF",
                   Enrich::sourceHost(Enrich::SRC_HAM), Settings::loraLookupCall() ? "on" : "off",
-                  Enrich::sourceHost(Enrich::SRC_OGN), Settings::loraLookupOgn() ? "on" : "off");
+                  Enrich::sourceHost(Enrich::SRC_OGN), Settings::loraLookupOgn() ? "on" : "off",
+                  Enrich::sourceHost(Enrich::SRC_MC_FEED), Settings::loraLookupFeed() ? "on" : "off");
+    // The feed's own counters, said plainly: what it asked for, what came back,
+    // and the one sentence that matters about what went out. A request of
+    // "limit=24" in the log below is the whole of it -- there is no identifier
+    // in it to read.
+    Serial.printf("[lora] mc adverts: %lu poll%s, %u of %u rows held, %lu rows parsed, %lu table writes, next in %lus\n",
+                  (unsigned long)Feed::polls(), Feed::polls() == 1 ? "" : "s",
+                  (unsigned)Feed::rowCount(), (unsigned)Feed::ROW_MAX,
+                  (unsigned long)Feed::rowsSeen(), (unsigned long)Feed::tableWrites(),
+                  (unsigned long)(Feed::dueInMs(millis()) / 1000));
     Enrich::Progress pr;
     Enrich::progress(pr, millis());
     Serial.printf("[lora] %u queued, %u request%s sent, %u answered, %u not listed, %u no answer%s\n",
@@ -808,6 +834,51 @@ static void lookupsConsole() {
     }
     Serial.printf("[lora] %u of the last %u request%s; nothing else has left this board\n",
                   (unsigned)n, (unsigned)Enrich::LOG_MAX, n == 1 ? "" : "s");
+    Serial.println("[lora] the adverts rows say \"limit=24\": a row count, and nothing about anything heard here");
+}
+
+// LORA FEED: the adverts table, and what each held row would name. The place to
+// see the ambiguous answer happen -- a relay-only node row pins down one byte of
+// a key, and one byte is not usually enough (include/lora_feed.h).
+static void feedConsole() {
+    Serial.printf("[lora] mc adverts %s (%s), limit %u a poll, %u of %u rows held, %lu poll%s\n",
+                  (Settings::loraLookups() && Settings::loraLookupFeed()) ? "ON" : "OFF",
+                  Enrich::sourceHost(Enrich::SRC_MC_FEED), (unsigned)Feed::LIMIT,
+                  (unsigned)Feed::rowCount(), (unsigned)Feed::ROW_MAX,
+                  (unsigned long)Feed::polls(), Feed::polls() == 1 ? "" : "s");
+    for (uint8_t i = 0; i < Feed::rowCount(); i++) {
+        Feed::Row r;
+        if (!Feed::rowAt(i, r)) break;
+        Serial.printf("[lora] %02x%02x%02x%02x%02x%02x%02x%02x  %-10s %s\n",
+                      r.key[0], r.key[1], r.key[2], r.key[3], r.key[4], r.key[5], r.key[6], r.key[7],
+                      r.role, r.name);
+    }
+    // Then the other direction: every MeshCore row this board HEARD, and what
+    // the table can and cannot say about it. This is the payoff and the audit in
+    // one listing.
+    uint8_t named = 0, weak = 0, amb = 0, none = 0;
+    for (uint8_t i = 0; i < Nodes::count(); i++) {
+        const Nodes::Node* nd = Nodes::at(i);
+        if (!nd || nd->proto != Proto::MESHCORE) continue;
+        uint8_t pre[Feed::KEY_BYTES];
+        const uint8_t np = Feed::prefix(*nd, pre, sizeof pre);
+        Feed::Row r;
+        uint8_t cand = 0;
+        const Feed::Match m = Feed::match(*nd, r, cand);
+        if (m == Feed::MATCH_ONE) named++;
+        else if (m == Feed::MATCH_WEAK) weak++;
+        else if (m == Feed::MATCH_AMBIGUOUS) amb++;
+        else none++;
+        Serial.printf("[lora] heard %-10s %-22s %u byte%s -> %-9s %u candidate%s %s\n",
+                      nd->tag, nd->name[0] ? nd->name : "-", (unsigned)np, np == 1 ? " " : "s",
+                      Feed::matchText(m)[0] ? Feed::matchText(m) : "not in feed",
+                      (unsigned)cand, cand == 1 ? " " : "s",
+                      m == Feed::MATCH_ONE ? r.name : "");
+    }
+    Serial.printf("[lora] %u named, %u one-byte candidates, %u ambiguous, %u not in the feed\n",
+                  (unsigned)named, (unsigned)weak, (unsigned)amb, (unsigned)none);
+    Serial.println("[lora] only an eight-byte match is named. A one-byte hit is a candidate:");
+    Serial.println("[lora] measured on 200 live rows, such a name is wrong 27-77 % of the time.");
 }
 
 bool console(const char* line) {
@@ -820,6 +891,9 @@ bool console(const char* line) {
     // the no-module gate.
     if (strncasecmp(a, "CHAN", 4) == 0) return channelConsole(a + 4);
     if (strcasecmp(a, "LOOKUPS") == 0) { lookupsConsole(); return true; }
+    // Like CHAN and LOOKUPS, before the no-module gate: the table and what it
+    // would name are worth reading on a board whose radio never answered.
+    if (strcasecmp(a, "FEED") == 0) { feedConsole(); return true; }
     if (!s_present) { Serial.println("[lora] no module answered at boot (LORA CHAN still works: the keys are not the radio's)"); return true; }
     if (*a == '\0' || strcasecmp(a, "STATUS") == 0) {
         char s[96];
@@ -947,16 +1021,39 @@ bool console(const char* line) {
                 snprintf(online, sizeof online, "  [%s %s%s%s%s%s]", Enrich::answerText(er.answer),
                          er.what, er.where[0] ? " " : "", er.where,
                          er.extra[0] ? " " : "", er.extra);
-            Serial.printf("[lora] %-11s %-10s %-22s %-9s %-26s %3u pkt %3u direct  %-15s  %lus ago  %s%s%s %s%s\n",
+            // What the adverts feed can say, marked `~` because it was not heard
+            // here -- the same distinction Ident's "(claimed)" makes. An
+            // ambiguous match says so and names nobody.
+            char feed[48] = "";
+            Feed::Row fr;
+            uint8_t cand = 0;
+            switch (Feed::match(*nd, fr, cand)) {
+                case Feed::MATCH_ONE:
+                    snprintf(feed, sizeof feed, "  [~%s %s]", fr.role, fr.name);
+                    break;
+                case Feed::MATCH_WEAK:
+                    // One byte matched. The feed holds a node whose key starts
+                    // with this path hash, and that is the whole of what we
+                    // know: see lora_feed.h for why printing its name would be
+                    // wrong between 27 and 77 % of the time. The fact that a
+                    // candidate exists is still worth saying.
+                    snprintf(feed, sizeof feed, "  [~1 byte only, 1 candidate]");
+                    break;
+                case Feed::MATCH_AMBIGUOUS:
+                    snprintf(feed, sizeof feed, "  [~%u feed rows share this prefix]", (unsigned)cand);
+                    break;
+                default: break;
+            }
+            Serial.printf("[lora] %-11s %-10s %-22s %-9s %-26s %3u pkt %3u direct  %-15s  %lus ago  %s%s%s %s%s%s\n",
                           protoName(nd->proto), nd->tag, nd->name[0] ? nd->name : "-",
                           Nodes::roleText(*nd), sig,
                           (unsigned)nd->packets, (unsigned)nd->directPackets, dut,
-                          (unsigned long)((now - nd->lastMs) / 1000), pos, gridTxt, who, flags, online);
+                          (unsigned long)((now - nd->lastMs) / 1000), pos, gridTxt, who, flags, online, feed);
         }
         Serial.printf("[lora] %u node(s)\n", (unsigned)n);
         return true;
     }
-    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | CHAN | NODES | LOOKUPS | SWEEP [kHz from to step]");
+    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | CHAN | NODES | LOOKUPS | FEED | SWEEP [kHz from to step]");
     Serial.println("[lora] LORA CHAN on its own lists the keys and the rest of its words");
     return true;
 }

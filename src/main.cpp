@@ -5353,12 +5353,13 @@ void loop() {
                             Lora::setMode((Lora::Mode)Settings::loraMode());
                             break;
                         // Each switch is its own tap, and turning the master
-                        // off leaves the two under it as they were: coming
+                        // off leaves the three under it as they were: coming
                         // back to ON must not silently re-enable a source
                         // somebody had singled out and turned off.
                         case SettingsRow::LORA_LOOKUPS: Settings::toggleLoraLookups(); break;
                         case SettingsRow::LORA_LK_CALL: Settings::toggleLoraLookupCall(); break;
                         case SettingsRow::LORA_LK_OGN:  Settings::toggleLoraLookupOgn(); break;
+                        case SettingsRow::LORA_LK_FEED: Settings::toggleLoraLookupFeed(); break;
                         case SettingsRow::LORA_PROFILE: {
                             // Steps through the table; FOCUS follows at once
                             // so the change can be heard while the row is

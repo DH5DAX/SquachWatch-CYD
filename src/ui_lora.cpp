@@ -8,6 +8,7 @@
 #include "lora_nodes.h"
 #include "lora_ident.h"
 #include "lora_enrich.h"
+#include "lora_feed.h"
 #include "settings.h"
 #include <Arduino.h>
 #include <string.h>
@@ -235,6 +236,26 @@ void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         Lora::Enrich::Record er;
         const bool asked = Lora::Enrich::cached(n.proto, n.id, er);
         const char* look = !asked ? "" : er.answer == Lora::Enrich::ANS_HIT ? "." : "-";
+        // A name from the adverts feed, for a row that gave none on the air --
+        // which is most relay-only MeshCore rows, whose name column otherwise
+        // reads "repeater" for ever. The ~ says it was not heard here, the same
+        // distinction "(claimed)" makes for an extracted callsign, and an
+        // ambiguous match falls through to the role: a wrong name is worse than
+        // no name, and a name that is only probably right is a wrong name 4.4 %
+        // of the time (include/lora_feed.h).
+        char named[26] = "";
+        if (!n.name[0]) {
+            Lora::Feed::Row fr;
+            uint8_t cand = 0;
+            // MATCH_ONE only, never MATCH_WEAK. A relay-only row pins down one
+            // byte of a key, and lora_feed.h works out from 200 live rows that
+            // a name printed on that much evidence is wrong between 27 and
+            // 77 % of the time. This screen has one line per node and no room
+            // to qualify anything, so it says nothing rather than something
+            // plausible. LORA FEED on the console shows the candidates.
+            if (Lora::Feed::match(n, fr, cand) == Lora::Feed::MATCH_ONE)
+                snprintf(named, sizeof named, "~%s", fr.name);
+        }
         char sig[10] = "--";
         if (n.directPackets)   snprintf(sig, sizeof sig, "%d", (int)n.rssi);
         else if (n.viaPackets) snprintf(sig, sizeof sig, "v%d", (int)n.viaRssi);
@@ -247,7 +268,7 @@ void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
             snprintf(dut, sizeof dut, "%u.%u%%", duty / 10, duty % 10);
         }
         snprintf(line, sizeof line, "%-4s %-10.10s %-14.14s %5s %3u %4s %-5s %-6s %s%s%s", Lora::protoShort(n.proto), n.tag,
-                 n.name[0] ? n.name : Lora::Nodes::roleText(n), sig, (unsigned)n.packets, age,
+                 n.name[0] ? n.name : named[0] ? named : Lora::Nodes::roleText(n), sig, (unsigned)n.packets, age,
                  dut, where, look, flags[0] ? "!" : "", flags);
         t.setTextColor(n.flags ? Theme::AMBER : col, Theme::BG);
         t.setCursor(12, y + 3);
@@ -307,7 +328,7 @@ void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     // With nothing of one's own in the list, the useful sentence is the one
     // that fills it; after that, the one that says what a finger can do.
     t.print(mcU + mtU ? "tap to mute; the console adds them: LORA CHAN"
-                      : "no keys of your own: LORA CHAN GROUP NRW adds eleven");
+                      : "no keys of your own: LORA CHAN GROUP lists ten sets");
 }
 
 int statLine(TFT_eSPI& t, int y, uint16_t col, const char* label, const char* text) {
@@ -407,14 +428,25 @@ void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         if (!Settings::loraLookups()) {
             snprintf(b, sizeof b, "off: nothing about a node leaves this board");
         } else {
-            snprintf(b, sizeof b, "%s%s%s: %u sent, %u known, %u not listed, %u no answer%s",
+            // The feed is counted apart from the queue's three answers, because
+            // its answers are not the queue's: it fetched rows and the matching
+            // happened here, so "12 of 96 rows" is the honest figure and a hit
+            // count would not be.
+            char feed[40] = "";
+            if (Settings::loraLookupFeed())
+                snprintf(feed, sizeof feed, "; adverts %u rows", (unsigned)Lora::Feed::rowCount());
+            snprintf(b, sizeof b, "%s%s%s: %u sent, %u known, %u not listed, %u no answer%s%s",
                      Settings::loraLookupCall() ? "hamrig.com" : "",
                      (Settings::loraLookupCall() && Settings::loraLookupOgn()) ? " + " : "",
                      Settings::loraLookupOgn() ? "glidernet.org" : "",
                      (unsigned)pr.sent, (unsigned)pr.hit, (unsigned)pr.miss, (unsigned)pr.noAnswer,
-                     pr.queued ? ", more waiting for WiFi" : "");
-            if (!Settings::loraLookupCall() && !Settings::loraLookupOgn())
+                     pr.queued ? ", more waiting for WiFi" : "", feed);
+            if (!Settings::loraLookupCall() && !Settings::loraLookupOgn() && !Settings::loraLookupFeed())
                 snprintf(b, sizeof b, "on, but every source is off: nothing leaves");
+            else if (!Settings::loraLookupCall() && !Settings::loraLookupOgn())
+                snprintf(b, sizeof b, "meshcore.df0x.de: %lu polls, %u of %u rows held",
+                         (unsigned long)Lora::Feed::polls(), (unsigned)Lora::Feed::rowCount(),
+                         (unsigned)Lora::Feed::ROW_MAX);
         }
         y = statLine(t, y, Settings::loraLookups() ? Theme::AMBER : Theme::CYAN, "LOOKUP:", b);
     }

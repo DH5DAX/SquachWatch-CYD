@@ -73,6 +73,20 @@ uint8_t restore();
 // from. The tags' hashes are pinned in test/lora_channels_test.cpp against the
 // table in docs/LORA.md section 3.13, because a mistyped tag is not an error: it
 // is a different channel that quietly hears nothing for ever.
+//
+// TEN GROUPS, 49 TAGS, AND ROOM FOR 24. NRW is the eleven one operator listens
+// on; the other nine come from meshcore.df0x.de/api/init's `radarChannels`,
+// forty names measured on 2026-09-26 -- the list the club's own visualiser
+// watches, which is the list with traffic on it. They do not all fit and were
+// never meant to: MeshCore::maxUserChannels() is 24, so a board carries a
+// posture and not a catalogue. addGroup() adds what fits and leaves the rest,
+// and the console names the free slots when it runs short. The split is by
+// where and why -- BENCH, DE, AT-CH, EU, WORLD, NET, FIELD, SOCIAL, HAM -- so
+// that two groups is a sensible thing to hold and three is a decision.
+//
+// The keys are NOT written down in the table. A tag derives its own, which is
+// the whole reason a group can be a list of strings; the test does the
+// deriving and pins the result.
 uint8_t     groupCount();
 const char* groupName(uint8_t g);
 uint8_t     groupSize(uint8_t g);

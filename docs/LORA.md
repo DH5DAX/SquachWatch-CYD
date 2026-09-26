@@ -906,6 +906,45 @@ ciphertext decides which key was actually right, so a collision costs one
 extra decryption attempt and nothing else. It is worth saying on screen all
 the same, so that a quiet channel is not mistaken for a broken one.
 
+**Nine more groups, from the club server's own watch list.**
+`http://meshcore.df0x.de/api/init` is 606 bytes and carries `radarChannels`:
+forty names, `Public` plus thirty-nine hashtags, read 2026-09-26. That is the
+list the DF0X visualiser watches, which makes it the list with traffic on it,
+and because every entry is a hashtag its key derives offline from the name --
+nothing is fetched at runtime to use any of them. They are in
+`src/lora_channels.cpp` as nine groups beside NRW, every hash recomputed and
+pinned in `test/lora_channels_test.cpp`:
+
+| Group | Channels | Hashes |
+|---|---|---|
+| `BENCH` | `#test` `#ping` `#testing` | 0xD9 0x28 0x59 |
+| `DE` | `#berlin` `#hansemesh` `#dl-mitte` `#bsmesh` `#kiel` `#sh` | 0xB5 0xFC 0x90 0x93 0x55 0x0C |
+| `AT-CH` | `#switzerland` `#austria` `#vienna` | 0xE7 0xFB 0xDD |
+| `EU` | `#london` `#amsterdam` `#copenhagen` | 0xD5 0x32 0x83 |
+| `WORLD` | `#vancouver` `#thailand` `#queens` `#northeast` | 0xC8 0xB4 0x3E 0xC5 |
+| `NET` | `#meshcore` `#meshtastic` `#meshcorenetz` `#mesh` `#bot` `#bots` `#admin` `#public` `#info` `#news` | 0xEF 0xFE 0x7D 0xB0 0xCA 0x44 0x9E 0x66 0x3B 0x03 |
+| `FIELD` | `#wardriving` `#wardrive` `#camping` `#weather` `#emergency` `#prepper` | 0x81 0xE0 0x8E 0x03 0x68 0x49 |
+| `SOCIAL` | `#chat` `#coffee` `#beer` | 0xB8 0xD4 0xB0 |
+| `HAM` | `#ham` `#hamradio` | 0xE3 0xB3 |
+
+**They do not all fit, and were never meant to.** The MeshCore table holds 24
+user channels against 49 distinct tags, so a board carries a posture rather
+than a catalogue: NRW's eleven and NET's ten is 21 of 24, and a third group is
+where `LORA CHAN GROUP` starts reporting free slots instead of successes. It
+adds what fits and leaves the rest alone.
+
+**Two traps in that list, both pinned by tests.** `#public` is *not* the
+built-in Public channel: Public has the fixed key
+`8b3387e9c5cdea6ac9e5edbaa115cd72` and hash 0x11, while `#public` derives
+`8b4b705b080c0d943b1c80f6b3ef6b6d` and hash 0x66 -- two different channels that
+happen to share two leading hex digits. And `#wardriving` and `#wardrive` are
+two separate channels with two separate keys, both carrying traffic; neither is
+a typo for the other. Three further collisions appear across the whole list
+(`#news`/`#weather` at 0x03, `#mesh`/`#beer` at 0xB0, and NRW's own
+`#bochum`/`#rheine` at 0x6C), which is what a one-byte hash over 49 names looks
+like and is why the test asserts the collisions rather than assuming
+uniqueness.
+
 **Keys that are secrets, typed in by hand.** Private Meshtastic channels,
 private MeshCore channels, and LoRaWAN session keys or AppKeys for the user's
 own devices. `LORA CHAN MC|MT <name> <key>` takes 16 or 32 bytes as base64 or
@@ -1208,6 +1247,19 @@ What follows for the defaults:
      two sources are a callsign lookup for LoRa APRS and MeshCom, where the
      callsign is legally required station identification, and the OGN device
      database for FANET.
+  2a. **A feed that is told nothing at all.** The fourth switch, and the best
+     shape of the four: `http://meshcore.df0x.de/api/adverts/recent?limit=24`
+     sends a row count and nothing else -- no key, no prefix, no hash, no name,
+     nothing whatever about what this board heard -- and the MATCH happens
+     locally, against the node table the sniffer filled off the air. A log of
+     every such request, read by the server operator, reveals one fact: that a
+     SquachWatch asked what the network has been saying. It is
+     `include/lora_feed.h`, it is off by default like the rest, and its requests
+     are in the same `LORA LOOKUPS` log. **Nothing is published in return:**
+     there is no MQTT client, no observer registration and no report of what
+     this board heard going anywhere. It is a read-only consumer of a public
+     list, which was the instruction: *"nein, keine einspeisung, wir schauen
+     nur"*.
   3. **The device's own position, and the user's own data — never.** There is
      nothing on this board that knows where it is, and this feature must not
      become the reason to acquire it: the MeshCore area query that would want a
@@ -1288,6 +1340,14 @@ The amateur licence adds nothing there. The limits are:
 - **`lora_enrich`:** the online half -- the queue, the per-source rate limits,
   the negative cache, the request log and the two response parsers. Everything
   but the socket is host-tested.
+- **`lora_feed`:** the other shape of online -- a periodic poll of the DF0X
+  MeshCore adverts feed, matched locally against heard rows, with an *ambiguous*
+  answer for the case where a node row pins down too few key bytes to be sure.
+  Beside the queue rather than in it, because its request carries no identifier
+  and an Entry whose identifier is "24" would make the request log a lie.
+- **`lora_json`:** the scanner both of those read their responses with. One
+  implementation of the allow-list, host-tested on its own, because the bugs it
+  can have are the quiet kind.
 - **Storage:** a capture partition in the unused 7.4 MB of flash, written in
   batches.
 
@@ -1326,8 +1386,9 @@ DEX cards for the protocol types, and alerts only for `LORA_TRACKER`.
 ## 10. Measure first
 
 Eleven questions as they were written on 2026-09-26, before any of this met
-the board, and a twelfth added that evening when the online lookups were
-designed. The bench session that afternoon answered four of the eleven (1, 2, 4
+the board, a twelfth added that evening when the online lookups were designed,
+and a thirteenth the moment the twelfth ruled out both official MeshCore
+sources. The bench session that afternoon answered four of the eleven (1, 2, 4
 and 11), showed one to be the wrong question (3), half-answered one (8) and
 turned one into a defect to fix first (7); the twelfth was answered without the
 board at all, by reading the framework. The other four are untouched, and an
@@ -1426,6 +1487,41 @@ item that still says open is still open.
       registry row about a station that just broadcast its own identity in the
       clear. **The first version uses plain HTTP only, and the MeshCore
       registry waits for a proxy.**
+13. **Where does MeshCore node data come from, without TLS and without a
+    proxy?** Asked the same evening as 12, because 12 had just ruled out both
+    official MeshCore sources. **Answered, with curl, 2026-09-26 --
+    `meshcore.df0x.de`, the owner's own club server.**
+    - **The route.** `GET http://meshcore.df0x.de/api/adverts/recent?limit=N`
+      answers **200 over plain HTTP with no redirect**, which is the entire
+      reason it is usable. Rows carry `advert_pubkey` (full 64 hex), `name`,
+      `role_name`, `hash`, `lat`, `lon`, `iata`, `avg_rssi`, `avg_snr`,
+      `hop_count`, `observers`, `first_seen`, `recv_ts`. Three of those are
+      read; the rest are never parsed.
+    - **`limit` is honoured, linearly:** 939 B at 3, 1,658 at 5, 8,141 at 25,
+      13,050 at 40, 19,565 at 60, 26,033 at 80 — **325 B a row** over a 33 B
+      envelope. `iata`, `region` and `hours` are **ignored** (byte-identical
+      bodies), so the feed is global and cannot be asked for a region.
+    - **`hash` is not usable, and this correction matters.** It is sixteen hex
+      characters (**8 bytes**, not 4), distinct per row over 80 rows, and never
+      a prefix of `advert_pubkey` — nor `sha256(pubkey)[0..7]`. It is an id of
+      the visualiser's own, so matching goes against `advert_pubkey` and the
+      parser ignores `hash` deliberately.
+    - **`/api/init`** is 606 B and carries `radarChannels`, the forty channel
+      names now in [section 3.13](#313-channels-and-keys). **`/api/regions`** is
+      31,034 B over HTTPS, 213 rows, and is not used.
+    - **What the bench still has to confirm:** that the poll goes out and the
+      match lands, with WiFi up for another reason. Everything above was
+      measured from a laptop; nothing about the *device's* socket is answered by
+      it. The console sequence is in the feature's own notes.
+    - **Rejected, with reasons, so nobody re-treads them:** `map.meshcore.io`
+      serves `/api/v1/nodes` as a **49,574,299 B** dump or one node by full
+      64-hex key over HTTPS only — and this firmware keeps 8 of those 32 bytes
+      for its best rows and 1 for the rest, so the single-node route could not
+      be called even if TLS fitted. `analyzer.meshcorenetz.de/api/nodes` ignores
+      every query parameter tried and returns **28.4 MB**. `letsmesh.net`
+      publishes no query API and every host under it returns **403** to anything
+      that is not a browser, `/robots.txt` included: unusable from a device and
+      unverifiable from a laptop.
 
 ---
 

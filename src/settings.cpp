@@ -161,11 +161,12 @@ static bool     s_buzzer       = false;
 // the sysop's, set from the LORA screen or the console.
 static uint8_t  s_loraMode     = 2;
 static uint8_t  s_loraFocus    = 0;
-// The online lookups, all three OFF. See Settings::loraLookups() for why the
+// The online lookups, all four OFF. See Settings::loraLookups() for why the
 // default is the opposite of the update check's.
 static bool     s_loraLookups  = false;
 static bool     s_loraLkCall   = false;
 static bool     s_loraLkOgn    = false;
+static bool     s_loraLkFeed   = false;
 
 // ---- status light --------------------------------------------------------
 static bool    s_lightOn     = true;
@@ -305,8 +306,8 @@ uint8_t loraMode()  { return s_loraMode; }
 void cycleLoraMode() { s_loraMode = (uint8_t)((s_loraMode + 1) % 3); s_prefs.putUChar("loraMode", s_loraMode); }
 uint8_t loraFocus() { return s_loraFocus; }
 void setLoraFocus(uint8_t ix) { s_loraFocus = ix; s_prefs.putUChar("loraFocus", ix); }
-// Keys: 9, 9 and 8 characters, inside NVS's limit of 15, and none of them is a
-// prefix of "loraChans" -- which matters, because that entry holds the whole
+// Keys: 8, 9, 9 and 9 characters, inside NVS's limit of 15, and none of them is
+// a prefix of "loraChans" -- which matters, because that entry holds the whole
 // channel list and is the one thing in this namespace that must not be
 // shadowed by a near-miss key.
 bool loraLookups()       { return s_loraLookups; }
@@ -315,6 +316,8 @@ bool loraLookupCall()       { return s_loraLkCall; }
 void toggleLoraLookupCall() { s_loraLkCall = !s_loraLkCall; s_prefs.putBool("loraLkCal", s_loraLkCall); }
 bool loraLookupOgn()       { return s_loraLkOgn; }
 void toggleLoraLookupOgn() { s_loraLkOgn = !s_loraLkOgn; s_prefs.putBool("loraLkOgn", s_loraLkOgn); }
+bool loraLookupFeed()       { return s_loraLkFeed; }
+void toggleLoraLookupFeed() { s_loraLkFeed = !s_loraLkFeed; s_prefs.putBool("loraLkMcF", s_loraLkFeed); }
 
 // The channel list. Bytes in, bytes out: the store does not know or care what
 // a MeshCore hashtag is, which is why this pair takes a blob and the record
@@ -472,6 +475,7 @@ void load() {
     s_loraLookups  = s_prefs.getBool("loraLkup", false);
     s_loraLkCall   = s_prefs.getBool("loraLkCal", false);
     s_loraLkOgn    = s_prefs.getBool("loraLkOgn", false);
+    s_loraLkFeed   = s_prefs.getBool("loraLkMcF", false);
     s_lightOn      = s_prefs.getBool("ltOn", true);
     s_lightAlerts  = s_prefs.getBool("ltAlert", true);
     s_lightMsgs    = s_prefs.getBool("ltMsg", true);

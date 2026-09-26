@@ -62,11 +62,24 @@
 namespace Lora {
 namespace Enrich {
 
-// The sources, in the order the queue prefers them.
+// Every host this firmware may talk to about a LoRa node, in one table.
+//
+// SRC_HAM and SRC_OGN are QUEUE sources: one node row in, one identifier out,
+// one request. SRC_MC_FEED is not -- it is a periodic fetch of a list nobody
+// asked a question about, matched locally (include/lora_feed.h). It lives in
+// this enum anyway, and only for one reason: LORA LOOKUPS is the audit
+// surface, and a request the owner cannot see in that log might as well not
+// have been logged. One table of hosts, one request log, one console command.
+//
+// What keeps it out of the queue is structural, not a convention: plan() has
+// no case that produces it, so no Entry can ever carry it, and the host test
+// pins that for every protocol. allowed() refuses it a second time, at the
+// moment step() would pick one.
 enum Source : uint8_t {
     SRC_HAM = 0,        // hamrig.com callsign lookup, for APRS and MeshCom only
     SRC_OGN = 1,        // the OGN device database, for FANET
-    SRC_COUNT = 2,
+    SRC_MC_FEED = 2,    // meshcore.df0x.de recent adverts -- a feed, not a lookup
+    SRC_COUNT = 3,
 };
 const char* sourceName(uint8_t s);      // "callsign"
 const char* sourceHost(uint8_t s);      // "hamrig.com"
@@ -83,6 +96,10 @@ const char* sourcePath(uint8_t s);
 // unverified, and this must not be tuned down to find it.
 // hamrig: 1,000 as a courtesy. No limit is published, which is not the same
 // as none existing -- and it is the owner's own server.
+// meshcore.df0x.de: 300,000. Not a rate limit -- a POLL PERIOD. Nothing on
+// that server asked for one; it is the club's own box and the figure is chosen
+// against what the request is worth, which is a list of the adverts the whole
+// network saw in the last few minutes. See include/lora_feed.h.
 uint32_t sourceSpacingMs(uint8_t s);
 
 // ---- what would be sent for a row ------------------------------------------
@@ -207,6 +224,28 @@ void    clearAll();                     // the cache, the queue and the log
 typedef int  (*Fetch)(uint8_t source, const char* text, char* body, size_t cap, size_t& len);
 typedef bool (*NetUp)();
 void setTransport(Fetch f, NetUp up);
+
+// The same socket path, for the adverts feed, which is not a queue entry but
+// is still a GET to a host in the table above. Shared rather than copied so
+// that there is ONE place that turns a source and a string into a URL, one
+// user agent, one timeout, and one answer to "what can this board connect
+// to" -- and so that the canned transport a host test installs stands in for
+// the feed as well. Installs the platform default on first use.
+int  fetch(uint8_t source, const char* text, char* body, size_t cap, size_t& len);
+bool netUp();
+
+// One row in the request log, for a request this module did not issue itself.
+// The feed calls it; nothing else does. It is a WRITE TO THE LOG and not a
+// second entrance to the queue -- rule 2 is about what can be asked, and this
+// cannot ask anything.
+//
+// It also counts toward Progress::sent, deliberately: that number answers "how
+// many requests has this board made", and a request left out of it because it
+// came from another module would make the answer wrong. Progress::hit, miss and
+// noAnswer stay the queue's alone, so they no longer sum to sent -- they never
+// did, since an entry can be in flight, and the feed's own counters are
+// Feed::polls() and Feed::rowCount().
+void logRequest(uint8_t source, const char* what, int code, size_t bytes, uint32_t now);
 
 }
 }

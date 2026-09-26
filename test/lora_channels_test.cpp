@@ -26,6 +26,7 @@
 #include "test_util.h"
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>   // strcasecmp: the group names are matched the way a console matches them
 #include <cstdio>
 
 // The two things settings.cpp reaches for that are not under test.
@@ -303,6 +304,158 @@ int main() {
         ck("#gelsenkirchen among them, with its hash",
            indexOfName("#gelsenkirchen") > 0 &&
            MeshCore::channel((uint8_t)indexOfName("#gelsenkirchen")).hash == 0x59);
+    }
+
+    suite("The radar groups: every tag from /api/init, every hash pinned");
+    {
+        // The nine groups added from meshcore.df0x.de/api/init's radarChannels,
+        // read on 2026-09-26: forty names, "Public" and thirty-nine hashtags.
+        //
+        // WHY THIS TEST IS LONG AND BORING. A mistyped tag is not an error and
+        // never will be: it is a different channel that decrypts nothing, for
+        // ever, quietly. Nothing on the board would ever say so. So every tag is
+        // written out twice -- once in src/lora_channels.cpp, once here -- and
+        // every hash is derived by the firmware's own SHA-256 and compared
+        // against a byte computed independently. The pairs below were produced
+        // from the radarChannels array itself, not retyped from a page.
+        struct Want { const char* group; const char* tag; uint8_t hash; };
+        const Want WANT[] = {
+            { "BENCH",  "#test",         0xD9 },   // the bench value docs/LORA.md 3.2 already pinned
+            { "BENCH",  "#ping",         0x28 },
+            { "BENCH",  "#testing",      0x59 },
+            { "DE",     "#berlin",       0xB5 },
+            { "DE",     "#hansemesh",    0xFC },
+            { "DE",     "#dl-mitte",     0x90 },
+            { "DE",     "#bsmesh",       0x93 },
+            { "DE",     "#kiel",         0x55 },
+            { "DE",     "#sh",           0x0C },
+            { "AT-CH",  "#switzerland",  0xE7 },
+            { "AT-CH",  "#austria",      0xFB },
+            { "AT-CH",  "#vienna",       0xDD },
+            { "EU",     "#london",       0xD5 },
+            { "EU",     "#amsterdam",    0x32 },
+            { "EU",     "#copenhagen",   0x83 },
+            { "WORLD",  "#vancouver",    0xC8 },
+            { "WORLD",  "#thailand",     0xB4 },
+            { "WORLD",  "#queens",       0x3E },
+            { "WORLD",  "#northeast",    0xC5 },
+            { "NET",    "#meshcore",     0xEF },
+            { "NET",    "#meshtastic",   0xFE },
+            { "NET",    "#meshcorenetz", 0x7D },
+            { "NET",    "#mesh",         0xB0 },
+            { "NET",    "#bot",          0xCA },
+            { "NET",    "#bots",         0x44 },
+            { "NET",    "#admin",        0x9E },
+            { "NET",    "#public",       0x66 },
+            { "NET",    "#info",         0x3B },
+            { "NET",    "#news",         0x03 },
+            { "FIELD",  "#wardriving",   0x81 },
+            { "FIELD",  "#wardrive",     0xE0 },
+            { "FIELD",  "#camping",      0x8E },
+            { "FIELD",  "#weather",      0x03 },
+            { "FIELD",  "#emergency",    0x68 },
+            { "FIELD",  "#prepper",      0x49 },
+            { "SOCIAL", "#chat",         0xB8 },
+            { "SOCIAL", "#coffee",       0xD4 },
+            { "SOCIAL", "#beer",         0xB0 },
+            { "HAM",    "#ham",          0xE3 },
+            { "HAM",    "#hamradio",     0xB3 },
+        };
+        const int NW = (int)(sizeof WANT / sizeof WANT[0]);
+
+        bool hashes = true, placed = true;
+        for (int i = 0; i < NW; i++) {
+            uint8_t k[16];
+            MeshCore::hashtagKey(WANT[i].tag, k);
+            if (MeshCore::channelHash(k) != WANT[i].hash) {
+                hashes = false;
+                printf("      %s: hash %02x, expected %02x\n", WANT[i].tag,
+                       (unsigned)MeshCore::channelHash(k), (unsigned)WANT[i].hash);
+            }
+            // And it is in the group it is supposed to be in, at some position.
+            const int g = Lora::Chan::findGroup(WANT[i].group);
+            bool found = false;
+            for (uint8_t j = 0; g >= 0 && j < Lora::Chan::groupSize((uint8_t)g); j++)
+                if (strcmp(Lora::Chan::groupTag((uint8_t)g, j), WANT[i].tag) == 0) found = true;
+            if (!found) { placed = false; printf("      %s is not in %s\n", WANT[i].tag, WANT[i].group); }
+        }
+        ck("every tag derives the hash it is supposed to", hashes);
+        ck("and sits in the group it is supposed to", placed);
+
+        // The other direction: no group holds a tag that is not in this table,
+        // which is what catches a tag added to the source and nowhere else.
+        int total = 0;
+        bool unexpected = false;
+        for (uint8_t g = 0; g < Lora::Chan::groupCount(); g++) {
+            if (strcasecmp(Lora::Chan::groupName(g), "NRW") == 0) continue;   // pinned above
+            for (uint8_t j = 0; j < Lora::Chan::groupSize(g); j++) {
+                total++;
+                bool known = false;
+                for (int i = 0; i < NW; i++) if (strcmp(Lora::Chan::groupTag(g, j), WANT[i].tag) == 0) known = true;
+                if (!known) { unexpected = true; printf("      unpinned tag: %s\n", Lora::Chan::groupTag(g, j)); }
+            }
+        }
+        ck("no group holds an unpinned tag", !unexpected);
+        ck("and the count is the whole radar list plus #hamradio", total == NW);
+
+        // #public is NOT the built-in Public channel, and that is the trap in
+        // radarChannels: the names differ by a hash character and a capital, the
+        // keys share two leading hex digits, and they are different channels.
+        uint8_t pub[16];
+        MeshCore::hashtagKey("#public", pub);
+        ck("#public derives a key of its own", MeshCore::channelHash(pub) == 0x66);
+        ck("and it is not the built-in Public channel's",
+           memcmp(pub, MeshCore::channel(0).key, 16) != 0 &&
+           MeshCore::channel(0).hash == 0x11);
+
+        // The 24-entry table against 49 tags: two groups fit, and the third is
+        // where it stops. This is a designed limit, not a surprise.
+        ck("ten groups", Lora::Chan::groupCount() == 10);
+        bool allFit = true;
+        for (uint8_t g = 0; g < Lora::Chan::groupCount(); g++)
+            if (Lora::Chan::groupSize(g) > MeshCore::maxUserChannels()) allFit = false;
+        ck("no single group is bigger than the table", allFit);
+        MeshCore::clearUserChannels();
+        const int nrw = Lora::Chan::findGroup("NRW");
+        const int net = Lora::Chan::findGroup("NET");
+        ck("the two biggest groups fit together",
+           nrw >= 0 && net >= 0 &&
+           Lora::Chan::addGroup((uint8_t)nrw) == Lora::Chan::groupSize((uint8_t)nrw) &&
+           Lora::Chan::addGroup((uint8_t)net) == Lora::Chan::groupSize((uint8_t)net) &&
+           MeshCore::userChannelCount() == 21);
+        const int world = Lora::Chan::findGroup("WORLD");
+        ck("and a third fills the table rather than overrunning it",
+           world >= 0 && Lora::Chan::addGroup((uint8_t)world) == 3 &&
+           MeshCore::userChannelCount() == MeshCore::maxUserChannels());
+        // The one that did not fit is still refused cleanly, not half-written.
+        ck("a group added to a full table adds nothing",
+           Lora::Chan::addGroup((uint8_t)Lora::Chan::findGroup("SOCIAL")) == 0 &&
+           MeshCore::userChannelCount() == MeshCore::maxUserChannels());
+
+        // Hash collisions inside a real list. Two of these pairs are in the
+        // groups above, and one of them was already inside NRW: the hash is one
+        // byte and the two-byte HMAC in front of the ciphertext is what actually
+        // decides (docs/LORA.md section 3.13). A test that assumed hashes were
+        // unique would be pinning a falsehood.
+        uint8_t a[16], b2[16];
+        MeshCore::hashtagKey("#bochum", a);
+        MeshCore::hashtagKey("#rheine", b2);
+        ck("#bochum and #rheine really do collide at 0x6c",
+           MeshCore::channelHash(a) == 0x6C && MeshCore::channelHash(b2) == 0x6C &&
+           memcmp(a, b2, 16) != 0);
+        MeshCore::hashtagKey("#news", a);
+        MeshCore::hashtagKey("#weather", b2);
+        ck("so do #news and #weather at 0x03",
+           MeshCore::channelHash(a) == 0x03 && MeshCore::channelHash(b2) == 0x03 &&
+           memcmp(a, b2, 16) != 0);
+        MeshCore::hashtagKey("#mesh", a);
+        MeshCore::hashtagKey("#beer", b2);
+        ck("and #mesh and #beer at 0xb0",
+           MeshCore::channelHash(a) == 0xB0 && MeshCore::channelHash(b2) == 0xB0 &&
+           memcmp(a, b2, 16) != 0);
+
+        MeshCore::clearUserChannels();
+        Lora::Chan::save();
     }
 
     suite("A Meshtastic channel with no key at all");

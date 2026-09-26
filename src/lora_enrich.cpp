@@ -10,6 +10,7 @@
 // is left to prove only that a socket works. There is no WiFi shim in sim/,
 // which is why that split is mandatory rather than tidy.
 #include "lora_enrich.h"
+#include "lora_json.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,19 @@ const SourceDef SOURCES[SRC_COUNT] = {
     // in {"devices":[ ... ]} -- the schema's envelope, which a single-device
     // query keeps.
     { "aircraft", "ddb.glidernet.org",  "/download/?j=1&device_id=%s",   12000 },
+    // Verified 2026-09-26: 200 over plain http with NO redirect, which is the
+    // only reason this source is usable at all -- the official map.meshcore.io
+    // is HTTPS-only and TLS does not fit this chip (36,490 B wanted from
+    // internal RAM, measured with tools/tls_fit_probe.sh). Body is
+    // {"adverts":[..]} and 325 B a row measured across limit=3..80.
+    //
+    // THE %s HERE IS NOT AN IDENTIFIER. It is a row COUNT. Every other path in
+    // this table interpolates something this board heard on the air; this one
+    // interpolates a number, and the request therefore says nothing whatever
+    // about what this board has heard. That is the strongest privacy property
+    // of any of the three sources and the whole reason this feed was preferred
+    // over a per-node registry query.
+    { "adverts",  "meshcore.df0x.de",   "/api/adverts/recent?limit=%s",  300000 },
 };
 
 // ---- state -------------------------------------------------------------------
@@ -64,7 +78,7 @@ struct Entry {
 
 Entry    s_q[QUEUE_MAX];
 uint8_t  s_qn = 0;
-uint32_t s_srcNextMs[SRC_COUNT] = { 0, 0 };
+uint32_t s_srcNextMs[SRC_COUNT] = { 0, 0, 0 };
 
 Record*  s_cache = nullptr;         // PSRAM; see begin()
 char*    s_body  = nullptr;         // PSRAM, beside it
@@ -94,84 +108,13 @@ inline void lock()   {}
 inline void unlock() {}
 #endif
 
-// ---- a JSON scanner, not a JSON library --------------------------------------
-// src/ota_wifi.cpp:238 establishes the pattern and the reason: a scanner reads
-// the handful of keys it wants and cannot be surprised by the rest of the
-// document. Here that is the whole defence -- a key this does not name is a
-// key that never reaches RAM this side of the socket buffer.
-
-// The value of "key" as a string, searched only between from and to.
-bool jsonStr(const char* from, const char* to, const char* key, char* out, size_t cap) {
-    if (!out || !cap) return false;
-    out[0] = '\0';
-    char needle[24];
-    snprintf(needle, sizeof needle, "\"%s\"", key);
-    const size_t nl = strlen(needle);
-    const char* p = from;
-    while (p + nl <= to) {
-        if (memcmp(p, needle, nl) == 0) break;
-        p++;
-    }
-    if (p + nl > to) return false;
-    p += nl;
-    while (p < to && (*p == ' ' || *p == ':')) p++;
-    if (p >= to || *p != '"') return false;      // null, a number or an object: not a string
-    p++;
-    size_t o = 0;
-    while (p < to && *p != '"') {
-        char c = *p++;
-        if (c == '\\' && p < to) {
-            const char e = *p++;
-            // Escapes are read, not copied: \" would otherwise end the value
-            // early and scramble everything after it. The fonts are ASCII, so
-            // anything this cannot spell becomes a question mark.
-            c = (e == '"' || e == '\\' || e == '/') ? e : '?';
-            if (e == 'u') for (int i = 0; i < 4 && p < to; i++) p++;
-        }
-        if ((unsigned char)c >= 0x80) c = '?';
-        if (o + 1 < cap) out[o++] = c;
-    }
-    out[o] = '\0';
-    return o != 0;
-}
-
-// The object that "key" names, as [begin,end). Brace counting, string-aware,
-// because the four keys this reads all live inside one object and identically
-// named keys live in the siblings: hamrig's envelope carries a `source` both
-// inside the callsign object and outside it, and its `hamrig_user` block is a
-// sibling that could carry a `city` of its own.
-bool jsonObj(const char* from, const char* to, const char* key,
-             const char*& begin, const char*& end) {
-    char needle[24];
-    snprintf(needle, sizeof needle, "\"%s\"", key);
-    const size_t nl = strlen(needle);
-    const char* p = from;
-    while (p + nl <= to && memcmp(p, needle, nl) != 0) p++;
-    if (p + nl > to) return false;
-    p += nl;
-    while (p < to && (*p == ' ' || *p == ':')) p++;
-    if (p >= to || *p != '{') return false;
-    begin = p;
-    int depth = 0;
-    bool inStr = false;
-    for (; p < to; p++) {
-        if (inStr) {
-            if (*p == '\\') p++;
-            else if (*p == '"') inStr = false;
-            continue;
-        }
-        if (*p == '"') inStr = true;
-        else if (*p == '{') depth++;
-        else if (*p == '}' && --depth == 0) { end = p + 1; return true; }
-    }
-    return false;
-}
-
-bool contains(const char* from, const char* to, const char* what) {
-    const size_t n = strlen(what);
-    for (const char* p = from; p + n <= to; p++) if (memcmp(p, what, n) == 0) return true;
-    return false;
-}
+// ---- reading a body ----------------------------------------------------------
+// The scanner that used to be here is src/lora_json.cpp. It moved the day the
+// MeshCore adverts feed (include/lora_feed.h) needed the same reads over a
+// different body: two copies of the code that implements rule 4 would be two
+// places to fix the next escape-handling bug in, and one of them would be
+// missed. The allow-list itself -- WHICH keys -- stays here, in the parsers
+// below, where the four names per source can be read in one screen.
 
 void put(char* dst, size_t cap, const char* src) {
     if (!src || !src[0]) { dst[0] = '\0'; return; }
@@ -255,13 +198,13 @@ Answer parseHamrig(const char* body, size_t len, int code, Record& out) {
     // The second miss shape: 200, success true, and every field the literal
     // string "NOT_FOUND" with source "hamdb". Its field list includes
     // `address`, which is why this is checked before anything is read.
-    if (contains(b, e, "\"NOT_FOUND\"") || contains(b, e, "\"error\"")) {
+    if (Json::has(b, e, "\"NOT_FOUND\"") || Json::has(b, e, "\"error\"")) {
         out.answer = ANS_MISS;
         return ANS_MISS;
     }
     const char* ob = nullptr;
     const char* oe = nullptr;
-    if (!jsonObj(b, e, "callsign", ob, oe)) {
+    if (!Json::obj(b, e, "callsign", ob, oe)) {
         // We asked and something came back that this cannot read. Asking again
         // returns the same bytes, so it is remembered rather than retried --
         // and the record stays empty, so nothing false reaches a screen.
@@ -269,10 +212,10 @@ Answer parseHamrig(const char* body, size_t len, int code, Record& out) {
         return ANS_MISS;
     }
     char v[40];
-    if (jsonStr(ob, oe, "country", v, sizeof v))       put(out.what,  sizeof out.what,  v);
-    if (jsonStr(ob, oe, "city", v, sizeof v))          put(out.where, sizeof out.where, v);
-    if (jsonStr(ob, oe, "grid_square", v, sizeof v))   put(out.grid,  sizeof out.grid,  v);
-    if (jsonStr(ob, oe, "license_class", v, sizeof v)) put(out.extra, sizeof out.extra, v);
+    if (Json::str(ob, oe, "country", v, sizeof v))       put(out.what,  sizeof out.what,  v);
+    if (Json::str(ob, oe, "city", v, sizeof v))          put(out.where, sizeof out.where, v);
+    if (Json::str(ob, oe, "grid_square", v, sizeof v))   put(out.grid,  sizeof out.grid,  v);
+    if (Json::str(ob, oe, "license_class", v, sizeof v)) put(out.extra, sizeof out.extra, v);
     // Four keys read, and that is the end of this body's life. No name, no
     // photo URL, no coordinates, and no address under any of its three
     // spellings.
@@ -290,7 +233,7 @@ Answer parseOgn(const char* body, size_t len, int code, Record& out) {
     const char* b = body;
     const char* e = body + len;
     // {"devices":[]} -- the address is not registered. A real miss.
-    if (contains(b, e, "\"devices\":[]")) { out.answer = ANS_MISS; return ANS_MISS; }
+    if (Json::has(b, e, "\"devices\":[]")) { out.answer = ANS_MISS; return ANS_MISS; }
     char v[40];
     // tracked=N is the pilot's own opt-out, and the only place in any of these
     // feeds where a dataset hands the device an explicit consent signal. The
@@ -298,16 +241,16 @@ Answer parseOgn(const char* body, size_t len, int code, Record& out) {
     // such rows, so there is nothing to suppress -- what a client can still get
     // wrong is showing the address of a device that asked not to be tracked, so
     // the record says so in words and carries no identity at all.
-    const bool optedOut = jsonStr(b, e, "tracked", v, sizeof v) && v[0] == 'N';
+    const bool optedOut = Json::str(b, e, "tracked", v, sizeof v) && v[0] == 'N';
     if (optedOut) {
         put(out.where, sizeof out.where, "opted out");
         out.answer = ANS_HIT;
         return ANS_HIT;
     }
-    if (jsonStr(b, e, "aircraft_model", v, sizeof v)) put(out.what, sizeof out.what, v);
+    if (Json::str(b, e, "aircraft_model", v, sizeof v)) put(out.what, sizeof out.what, v);
     char reg[24] = {0}, cn[8] = {0};
-    jsonStr(b, e, "registration", reg, sizeof reg);
-    jsonStr(b, e, "cn", cn, sizeof cn);
+    Json::str(b, e, "registration", reg, sizeof reg);
+    Json::str(b, e, "cn", cn, sizeof cn);
     if (reg[0] || cn[0]) snprintf(out.extra, sizeof out.extra, "%s%s%s", reg, (reg[0] && cn[0]) ? " " : "", cn);
     const bool any = out.what[0] || out.extra[0];
     out.answer = any ? ANS_HIT : ANS_MISS;
@@ -441,6 +384,9 @@ namespace {
 // mean "off from now on for rows nobody has seen yet".
 bool allowed(uint8_t source) {
     if (!s_master) return false;
+    // SRC_MC_FEED falls through to false, and must: it has a switch of its own
+    // (Settings::loraLookupFeed) which this module does not read, because
+    // nothing this module does can issue it. The feed asks for itself.
     return source == SRC_HAM ? s_ham : source == SRC_OGN ? s_ogn : false;
 }
 }  // namespace
@@ -450,7 +396,7 @@ void clearAll() {
     s_qn = s_cn = s_ln = s_lhead = 0;
     s_sent = s_hit = s_miss = s_noAnswer = 0;
     s_writes = 0;
-    s_srcNextMs[SRC_HAM] = s_srcNextMs[SRC_OGN] = 0;
+    for (uint8_t s = 0; s < SRC_COUNT; s++) s_srcNextMs[s] = 0;
     if (s_cache) memset(s_cache, 0, sizeof(Record) * CACHE_MAX);
     unlock();
 }
@@ -591,6 +537,13 @@ bool logAt(uint8_t i, LogRow& out) {
     return ok;
 }
 
+void logRequest(uint8_t source, const char* what, int code, size_t bytes, uint32_t now) {
+    lock();
+    logLocked(source, what, code, bytes, now);
+    s_sent++;
+    unlock();
+}
+
 void setTransport(Fetch f, NetUp up) { s_fetch = f; s_netUp = up; }
 
 // ---- the transport, and the only part a desktop cannot check -----------------
@@ -647,6 +600,10 @@ int httpGet(uint8_t source, const char* text, char* body, size_t cap, size_t& le
     return code;
 }
 
+// The platform default, installed on first use by whichever of the two callers
+// gets there first -- the queue's tick() or the adverts feed.
+void ensureTransport() { if (!s_fetch) setTransport(httpGet, wifiUp); }
+
 TaskHandle_t s_task = nullptr;
 
 void worker(void*) {
@@ -665,7 +622,7 @@ void worker(void*) {
 bool running() { return s_task != nullptr; }
 
 void tick(uint32_t) {
-    if (!s_fetch) setTransport(httpGet, wifiUp);
+    ensureTransport();
     if (s_task || !armed() || !s_qn || !wifiUp()) return;
     // 4 kB measured against ota_wifi.cpp's own plain-HTTP task, which uses
     // 3.2 kB of its 8 kB for the same HTTPClient shape plus an update's
@@ -674,9 +631,24 @@ void tick(uint32_t) {
         s_task = nullptr;
 }
 
+int fetch(uint8_t source, const char* text, char* body, size_t cap, size_t& len) {
+    ensureTransport();
+    len = 0;
+    return s_fetch ? s_fetch(source, text, body, cap, len) : -1;
+}
+bool netUp() { ensureTransport(); return s_netUp ? s_netUp() : false; }
+
 #else
 bool running() { return false; }
 void tick(uint32_t) {}
+// On a desktop there is no platform transport to fall back on, so these are
+// whatever the test installed -- which is the point: the feed's polling is
+// checked against a canned body by the same mechanism the queue's is.
+int fetch(uint8_t source, const char* text, char* body, size_t cap, size_t& len) {
+    len = 0;
+    return s_fetch ? s_fetch(source, text, body, cap, len) : -1;
+}
+bool netUp() { return s_netUp ? s_netUp() : false; }
 #endif
 
 }
