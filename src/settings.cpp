@@ -301,6 +301,29 @@ void cycleLoraMode() { s_loraMode = (uint8_t)((s_loraMode + 1) % 3); s_prefs.put
 uint8_t loraFocus() { return s_loraFocus; }
 void setLoraFocus(uint8_t ix) { s_loraFocus = ix; s_prefs.putUChar("loraFocus", ix); }
 
+// The channel list. Bytes in, bytes out: the store does not know or care what
+// a MeshCore hashtag is, which is why this pair takes a blob and the record
+// format lives with the decoders that write it.
+size_t loraChannels(uint8_t* out, size_t cap) {
+    if (!out || !cap) return 0;
+    // getBytesLength on a missing key is 0, which is exactly the empty list --
+    // no separate "has this ever been written" flag needed.
+    size_t len = s_prefs.getBytesLength("loraChans");
+    if (!len) return 0;
+    if (len > cap) len = cap;
+    return s_prefs.getBytes("loraChans", out, len);
+}
+
+bool setLoraChannels(const uint8_t* rec, size_t n) {
+    // Preferences::putBytes returns early on a zero-length value without
+    // touching NVS, so writing an empty list would be a silent no-op and the
+    // old blob would survive to be restored at the next boot. That exact bug
+    // shipped in v1.5.6 through v1.5.19 in IgnoreList::save(); emptying the list has
+    // to remove the key instead.
+    if (!rec || !n) { s_prefs.remove("loraChans"); return true; }
+    return s_prefs.putBytes("loraChans", rec, n) == n;
+}
+
 // ---- easter-egg hunt progress ----------------------------------------
 // Packed into one NVS entry rather than one each: the store has a few
 // hundred entries free and this is not where they should go.

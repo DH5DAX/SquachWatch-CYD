@@ -144,7 +144,7 @@ static const SettingsRow SYSTEM_ROWS[] = {
 #if defined(CROWPANEL7)
     // The wireless slot, on the one board that has it: the screen, the
     // mode, and the profile FOCUS parks on.
-    SettingsRow::LORA, SettingsRow::LORA_MODE, SettingsRow::LORA_PROFILE,
+    SettingsRow::LORA, SettingsRow::LORA_MODE, SettingsRow::LORA_PROFILE, SettingsRow::LORA_CHANNELS,
 #endif
     SettingsRow::RESET_STATS,
 };
@@ -943,6 +943,16 @@ static void rowContent(SettingsRow r, const DetectionEngine& eng, char* valBuf, 
         case SettingsRow::LORA_PROFILE:
             label = "LORA PROFILE"; value = Lora::profile(Settings::loraFocus()).name;
             break;
+        case SettingsRow::LORA_CHANNELS: {
+            // The row is the way IN to the list, so it counts the keys that
+            // are the user's own -- the built-in ones are not news.
+            label = "LORA CHANNELS";
+            uint8_t mcU = 0, mcM = 0, mtU = 0, mtM = 0;
+            Lora::channelCapacity(mcU, mcM, mtU, mtM);
+            snprintf(valBuf, valBufN, "%u >", (unsigned)(mcU + mtU));
+            value = valBuf;
+            break;
+        }
 #endif
         case SettingsRow::UPDATE_FIRMWARE:
             // The row names the newer version when one is known, so the boot

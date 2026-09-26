@@ -14,7 +14,7 @@
 namespace {
 
 LoraView s_view = LoraView::LIST;
-int      s_scroll[4] = { 0, 0, 0, 0 };
+int      s_scroll[5] = { 0, 0, 0, 0, 0 };   // one per LoraView, PACKET's unused
 uint16_t s_open = 0;          // PACKET: which frame, newest first
 uint32_t s_openTotal = 0;     // ...at which packetTotal(), so it tracks as new ones arrive
 
@@ -53,14 +53,32 @@ Bar bar(int screenW, int screenH) {
     return b;
 }
 
+// Four destinations and two buttons, so the pair names the NEIGHBOURS in the
+// cycle LIST -> NODES -> STATS -> CHANS -> LIST rather than "the other two":
+// every view is then one or two taps from every other, and a button always
+// says where it lands. PACKET keeps its own < and >.
+const LoraView CYCLE[4] = { LoraView::LIST, LoraView::NODES, LoraView::STATS, LoraView::CHANS };
+
+int cycleSlot(LoraView v) {
+    for (int i = 0; i < 4; i++) if (CYCLE[i] == v) return i;
+    return 0;
+}
+LoraView cycleStep(LoraView v, int delta) { return CYCLE[(cycleSlot(v) + 4 + delta) % 4]; }
+
+const char* viewLabel(LoraView v) {
+    switch (v) {
+        case LoraView::NODES: return "[ NODES ]";
+        case LoraView::STATS: return "[ STATS ]";
+        case LoraView::CHANS: return "[ CHANS ]";
+        default:              return "[ LIST ]";
+    }
+}
+
 void barLabels(const char* l[3]) {
     l[0] = "[ BACK ]";
-    switch (s_view) {
-        case LoraView::LIST:   l[1] = "[ NODES ]"; l[2] = "[ STATS ]"; break;
-        case LoraView::NODES:  l[1] = "[ LIST ]";  l[2] = "[ STATS ]"; break;
-        case LoraView::STATS:  l[1] = "[ LIST ]";  l[2] = "[ NODES ]"; break;
-        default:               l[1] = "[ < ]";     l[2] = "[ > ]";     break;
-    }
+    if (s_view == LoraView::PACKET) { l[1] = "[ < ]"; l[2] = "[ > ]"; return; }
+    l[1] = viewLabel(cycleStep(s_view, -1));
+    l[2] = viewLabel(cycleStep(s_view, +1));
 }
 
 int rowH(TFT_eSPI& t) { t.setTextSize(1); return t.fontHeight() + 6; }
@@ -206,6 +224,60 @@ void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     Theme::drawScrollbar(t, w - 6, top, bottom - top, count, (bottom - top) / rh, s_scroll[2]);
 }
 
+// The keys the decoders hold: which are known, which have been heard, and
+// which are switched off. A tap mutes one, and that is deliberately all a
+// finger can do -- see the header.
+void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
+    t.setTextSize(1);
+    const int rh = rowH(t);
+    const int lh = t.fontHeight() + 2;
+    uint8_t mcU = 0, mcM = 0, mtU = 0, mtM = 0;
+    Lora::channelCapacity(mcU, mcM, mtU, mtM);
+    char head[80];
+    // The presets are counted rather than listed: fourteen radio profiles
+    // times two key modes is twenty-eight rows of decoder capability, not
+    // twenty-eight channels anybody chose. One appears in the list as soon as
+    // it opens a frame.
+    snprintf(head, sizeof head, "keys: %u/%u MC, %u/%u MT, %u presets quiet",
+             (unsigned)mcU, (unsigned)mcM, (unsigned)mtU, (unsigned)mtM, (unsigned)Lora::channelsQuietBuiltIn());
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setCursor(6, top);
+    t.print(head);
+
+    const int listTop = top + lh + 2;
+    const int listBottom = bottom - lh - 2;
+    const uint8_t count = Lora::channelRowCount();
+    uiClampScroll(s_scroll[(int)LoraView::CHANS], count, listBottom - listTop, rh);
+    int y = listTop;
+    Lora::ChannelRow r;
+    for (int i = s_scroll[(int)LoraView::CHANS]; i < (int)count && y + rh <= listBottom; i++, y += rh) {
+        if (!Lora::channelRow((uint8_t)i, r)) break;
+        Theme::drawListRowPanel(t, w, y, rh);
+        // Dim for muted, the network's colour once it has opened something,
+        // white for a key that has never been used: "known but never heard" is
+        // exactly the state a sysop is looking for on this screen.
+        const uint16_t col = !r.enabled ? Theme::VAPOR_PURPLE : r.frames ? protoColor(r.proto) : Theme::WHITE;
+        t.fillRect(4, y + 3, 4, rh - 6, col);
+        char age[8] = "-";
+        if (r.lastMs) ageText(now, r.lastMs, age, sizeof age);
+        char line[128];
+        snprintf(line, sizeof line, "%-4s %-16.16s %02x %-8s %5lu %4s %s", Lora::protoShort(r.proto), r.name,
+                 (unsigned)r.hash, r.builtIn ? "built in" : r.derived ? "tag" : r.keyBits ? "key" : "plain",
+                 (unsigned long)r.frames, age, r.enabled ? "" : "MUTED");
+        t.setTextColor(col, Theme::BG);
+        t.setCursor(12, y + 3);
+        t.print(line);
+    }
+    Theme::drawScrollbar(t, w - 6, listTop, listBottom - listTop, count, (listBottom - listTop) / rh,
+                         s_scroll[(int)LoraView::CHANS]);
+    t.setTextColor(Theme::AMBER, Theme::BG);
+    t.setCursor(6, bottom - lh);
+    // With nothing of one's own in the list, the useful sentence is the one
+    // that fills it; after that, the one that says what a finger can do.
+    t.print(mcU + mtU ? "tap to mute; the console adds them: LORA CHAN"
+                      : "no keys of your own: LORA CHAN GROUP NRW adds eleven");
+}
+
 int statLine(TFT_eSPI& t, int y, uint16_t col, const char* label, const char* text) {
     t.setTextColor(col, Theme::BG);
     t.setCursor(6, y);
@@ -309,9 +381,9 @@ void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
 
 }
 
-void uiLoraInit(TFT_eSPI& t) {
+void uiLoraInit(TFT_eSPI& t, LoraView v) {
     t.fillRect(0, 0, t.width(), t.height(), Theme::BG);
-    s_view = LoraView::LIST;
+    s_view = v == LoraView::PACKET ? LoraView::LIST : v;   // PACKET needs a frame chosen first
 }
 
 LoraView uiLoraView() { return s_view; }
@@ -333,7 +405,11 @@ void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adva
         case LoraView::LIST:   snprintf(title, sizeof title, ">> LORA  (%u) <<", (unsigned)Lora::packetCount()); break;
         case LoraView::PACKET: snprintf(title, sizeof title, ">> LORA FRAME <<"); break;
         case LoraView::NODES:  snprintf(title, sizeof title, ">> LORA NODES  (%u) <<", (unsigned)Lora::nodeCount()); break;
-        default:               snprintf(title, sizeof title, ">> LORA CHANNEL <<"); break;
+        case LoraView::CHANS:  snprintf(title, sizeof title, ">> LORA CHANNELS  (%u) <<", (unsigned)Lora::channelRowCount()); break;
+        // STATS was titled "LORA CHANNEL" -- the radio channel. With a view
+        // about crypto channels next to it that title was a trap, and the
+        // button has always said STATS.
+        default:               snprintf(title, sizeof title, ">> LORA STATS <<"); break;
     }
     Theme::drawTitleBar(t, title);
     int top = drawStatus(t, w, BODY_TOP + 1);
@@ -341,6 +417,7 @@ void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adva
         case LoraView::LIST:   drawList(t, now, w, top, bottom); break;
         case LoraView::PACKET: drawPacket(t, now, w, top, bottom); break;
         case LoraView::NODES:  drawNodes(t, now, w, top, bottom); break;
+        case LoraView::CHANS:  drawChans(t, now, w, top, bottom); break;
         default:               drawStats(t, now, w, top, bottom); break;
     }
     drawBar(t, w, h);
@@ -358,9 +435,6 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
             return LoraTap::BACK;
         }
         switch (s_view) {
-            case LoraView::LIST:   s_view = which == 1 ? LoraView::NODES : LoraView::STATS; break;
-            case LoraView::NODES:  s_view = which == 1 ? LoraView::LIST  : LoraView::STATS; break;
-            case LoraView::STATS:  s_view = which == 1 ? LoraView::LIST  : LoraView::NODES; break;
             case LoraView::PACKET: {
                 // < is towards the newer frame, > the older, in the list's order.
                 const uint32_t total = Lora::packetTotal();
@@ -370,6 +444,7 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
                 s_open = (uint16_t)idx; s_openTotal = total;
                 break;
             }
+            default: s_view = cycleStep(s_view, which == 1 ? -1 : +1); break;
         }
         return LoraTap::HANDLED;
     }
@@ -381,6 +456,26 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
         Lora::setMode((Lora::Mode)next);
         if (next < 3) { while (Settings::loraMode() != next) Settings::cycleLoraMode(); }
         return LoraTap::HANDLED;
+    }
+    if (s_view == LoraView::CHANS && y >= BODY_TOP) {
+        const int rh = rowH(t);
+        t.setTextSize(1);
+        const int lh = t.fontHeight() + 2;
+        // The same arithmetic drawChans() lays the rows out with: the status
+        // line, then the count line, then the list.
+        const int listTop = BODY_TOP + 1 + t.fontHeight() + 3 + lh + 2;
+        if (y < listTop) return LoraTap::NONE;
+        const int row = s_scroll[(int)LoraView::CHANS] + (y - listTop) / rh;
+        Lora::ChannelRow r;
+        if (row >= 0 && Lora::channelRow((uint8_t)row, r)) {
+            if (Lora::toggleChannelRow((uint8_t)row))
+                Theme::showToast(r.enabled ? "MUTED" : "LISTENING", r.name,
+                                 r.enabled ? Theme::VAPOR_PURPLE : Theme::CYAN);
+            else
+                Theme::showToast("BUILT IN", "stays on -- yours go in over LORA CHAN", Theme::AMBER);
+            return LoraTap::HANDLED;
+        }
+        return LoraTap::NONE;
     }
     if (s_view == LoraView::LIST && y >= BODY_TOP) {
         const int rh = rowH(t);

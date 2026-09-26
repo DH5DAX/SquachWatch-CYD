@@ -6,6 +6,7 @@
 #include "lora_pb.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>   // strcasecmp: a channel name typed by a person
 
 namespace Meshtastic {
 
@@ -58,27 +59,39 @@ static const char* const PRESET_NAMES[] = {
 };
 static const uint8_t N_PRESETS = sizeof PRESET_NAMES / sizeof PRESET_NAMES[0];
 static const uint8_t MAX_USER = 6;
+static const uint8_t N_BUILTIN = (uint8_t)(2 * N_PRESETS);
 
 // The presets on the default key, the presets in ham mode (no key, so the
 // hash is the name's alone), then the user's.
 static Channel s_user[MAX_USER];
 static uint8_t s_nUser = 0;
+// Index-for-index with channel(). A parallel array rather than a field in
+// Channel, because channel() rebuilds each preset from the tables above on
+// every call and a counter in that struct would be reset by its own getter.
+static uint32_t s_frames[N_BUILTIN + MAX_USER];
+static uint32_t s_lastMs[N_BUILTIN + MAX_USER];
 
-uint8_t channelCount() { return (uint8_t)(2 * N_PRESETS + s_nUser); }
+uint8_t channelCount() { return (uint8_t)(N_BUILTIN + s_nUser); }
+uint8_t userChannelCount() { return s_nUser; }
+uint8_t maxUserChannels() { return MAX_USER; }
 
 const Channel& channel(uint8_t i) {
     static Channel c;
     if (i < N_PRESETS) {
-        strncpy(c.name, PRESET_NAMES[i], sizeof c.name - 1); c.name[sizeof c.name - 1] = '\0';
+        memset(&c, 0, sizeof c);
+        strncpy(c.name, PRESET_NAMES[i], sizeof c.name - 1);
         memcpy(c.key, DEFAULT_KEY, 16); c.keyLen = 16;
         c.hash = channelHash(c.name, c.key, 16);
+        c.enabled = true;      // built in, never switched off
         return c;
     }
     i -= N_PRESETS;
     if (i < N_PRESETS) {
-        strncpy(c.name, PRESET_NAMES[i], sizeof c.name - 1); c.name[sizeof c.name - 1] = '\0';
+        memset(&c, 0, sizeof c);
+        strncpy(c.name, PRESET_NAMES[i], sizeof c.name - 1);
         c.keyLen = 0;
         c.hash = channelHash(c.name, nullptr, 0);
+        c.enabled = true;
         return c;
     }
     i -= N_PRESETS;
@@ -88,6 +101,11 @@ const Channel& channel(uint8_t i) {
 
 bool addChannel(const char* name, const char* keyText) {
     if (s_nUser >= MAX_USER || !name || !*name) return false;
+    // A preset's name is already held, so "LongFast" with a key of one's own
+    // has to be called something else -- the hash is the name's as well as
+    // the key's, and two rows with one name would be indistinguishable on
+    // screen.
+    if (findChannel(name) >= 0) return false;
     Channel& c = s_user[s_nUser];
     memset(&c, 0, sizeof c);
     strncpy(c.name, name, sizeof c.name - 1);
@@ -104,11 +122,49 @@ bool addChannel(const char* name, const char* keyText) {
     if (keyText && *keyText && n == 0 && !(keyText[0] == '0' && keyText[1] == '\0')) return false;
     c.keyLen = (uint8_t)n;
     c.hash = channelHash(c.name, c.key, c.keyLen);
+    c.enabled = true;
+    s_frames[N_BUILTIN + s_nUser] = 0;
+    s_lastMs[N_BUILTIN + s_nUser] = 0;
     s_nUser++;
     return true;
 }
 
-void clearUserChannels() { s_nUser = 0; }
+void clearUserChannels() {
+    s_nUser = 0;
+    memset(s_frames + N_BUILTIN, 0, sizeof s_frames - N_BUILTIN * sizeof s_frames[0]);
+    memset(s_lastMs + N_BUILTIN, 0, sizeof s_lastMs - N_BUILTIN * sizeof s_lastMs[0]);
+}
+
+int findChannel(const char* name) {
+    if (!name || !*name) return -1;
+    for (uint8_t i = 0; i < channelCount(); i++)
+        if (strcasecmp(channel(i).name, name) == 0) return (int)i;
+    return -1;
+}
+
+bool removeChannel(uint8_t i) {
+    if (i < N_BUILTIN || i >= channelCount()) return false;
+    const uint8_t u = (uint8_t)(i - N_BUILTIN);
+    for (uint8_t k = u; k + 1 < s_nUser; k++) s_user[k] = s_user[k + 1];
+    for (uint8_t k = i; k + 1 < channelCount(); k++) { s_frames[k] = s_frames[k + 1]; s_lastMs[k] = s_lastMs[k + 1]; }
+    s_nUser--;
+    s_frames[N_BUILTIN + s_nUser] = 0;
+    s_lastMs[N_BUILTIN + s_nUser] = 0;
+    return true;
+}
+
+void setChannelEnabled(uint8_t i, bool on) {
+    if (i < N_BUILTIN || i >= channelCount()) return;
+    s_user[i - N_BUILTIN].enabled = on;
+}
+
+void noteChannelHeard(uint8_t i, uint32_t nowMs) {
+    if (i >= channelCount()) return;
+    s_frames[i]++;
+    s_lastMs[i] = nowMs;
+}
+uint32_t channelFrames(uint8_t i) { return i < channelCount() ? s_frames[i] : 0; }
+uint32_t channelLastMs(uint8_t i) { return i < channelCount() ? s_lastMs[i] : 0; }
 
 // ---- the cipher ---------------------------------------------------------------
 void decrypt(const Header& h, const Channel& c, uint8_t* payload, uint8_t len) {
@@ -423,7 +479,7 @@ bool decode(const Lora::Packet& pk, Decoded& out) {
     // parses wins. Ham-mode channels are plaintext, so "decrypt" is a copy.
     for (uint8_t i = 0; i < channelCount(); i++) {
         const Channel c = channel(i);
-        if (c.hash != out.hdr.channelHash) continue;
+        if (!c.enabled || c.hash != out.hdr.channelHash) continue;
         memcpy(out.plain, pk.data + 16, plen);
         decrypt(out.hdr, c, out.plain, plen);
         if (!parseData(out.plain, plen, out.data)) continue;

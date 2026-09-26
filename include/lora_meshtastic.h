@@ -29,13 +29,20 @@ uint8_t hopsAway(const Header& h);
 // ---- channels ---------------------------------------------------------------
 // A channel is a name and a key; the hash in the header is XOR(name bytes)
 // XOR XOR(key bytes). The presets on the default key are built in. A user
-// may add a few of their own (name + key, base64 or hex); those live in RAM
-// only until the settings store carries them.
+// may add a few of their own (name + key, base64 or hex); those are kept
+// across a reboot by lora_channels.cpp.
+//
+// Nothing here is derivable the way a MeshCore hashtag is: a Meshtastic
+// channel's key is a secret somebody hands over, so the stored form is the
+// key itself.
 struct Channel {
     char    name[24];
     uint8_t key[32];
     uint8_t keyLen;   // 0 = no encryption (ham mode), 16 or 32
     uint8_t hash;
+    // Muted: still listed and still stored, but decode() will not try it.
+    // The built-in presets are always on.
+    bool    enabled;
 };
 uint8_t  channelHash(const char* name, const uint8_t* key, uint8_t keyLen);
 // A one-byte PSK the way the apps carry it: 0 = none, 1 = the default key,
@@ -45,9 +52,27 @@ void     expandPsk(uint8_t psk, uint8_t out[16]);
 // LongFast 0x08, MediumFast 0x1F, ShortSlow 0x77 and so on.
 uint8_t        channelCount();
 const Channel& channel(uint8_t i);
-// The user's own; false when the table is full or the key does not parse.
+// The user's own; false when the table is full, the name is already held, or
+// the key does not parse.
 bool           addChannel(const char* name, const char* keyText);
 void           clearUserChannels();
+// How many of the list are the user's, and how many there is room for. The
+// built-in presets are the first channelCount() - userChannelCount() entries.
+uint8_t        userChannelCount();
+uint8_t        maxUserChannels();
+// The channel of that name, or -1; case-insensitive.
+int            findChannel(const char* name);
+// Forget one. Refuses a preset; the entries after it shift down, counters and
+// all, so an index is only good until the next call.
+bool           removeChannel(uint8_t i);
+// Mute or unmute one of the user's. A preset is always on.
+void           setChannelEnabled(uint8_t i, bool on);
+// What each channel's key has actually opened, index-for-index with
+// channel(). Fed from Lora::Nodes::note(), the one place a frame is decoded
+// exactly once -- decode() also runs for every row the screen redraws.
+void           noteChannelHeard(uint8_t i, uint32_t nowMs);
+uint32_t       channelFrames(uint8_t i);
+uint32_t       channelLastMs(uint8_t i);    // millis() of the last one; 0 = never
 
 // ---- the payload ------------------------------------------------------------
 // Decrypts payload (the bytes after the header) in place with the channel's

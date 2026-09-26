@@ -69,6 +69,7 @@ enum class SettingsRow : uint8_t {
     LORA,            // the CrowPanel 7 only: opens the LORA screen (SYSTEM page)
     LORA_MODE,       // ...and the slot's mode: OFF, FOCUS, SURVEY
     LORA_PROFILE,    // ...and which profile FOCUS parks on
+    LORA_CHANNELS,   // ...and the keys it holds: opens the LORA screen on CHANS
 #endif
     BOARD_BATTERY,   // the Freenove S3 only: the cell's voltage, on the SYSTEM page
     BACK,

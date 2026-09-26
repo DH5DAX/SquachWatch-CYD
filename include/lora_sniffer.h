@@ -66,6 +66,35 @@ uint8_t nodeCount();
 uint8_t nodeOrder(uint8_t* idx, uint8_t cap);
 bool    nodeAt(uint8_t i, Nodes::Node& out);
 
+// ---- the channel keys, for the CHANNELS view --------------------------------
+// One row per key worth showing. The screens go through here rather than
+// calling MeshCore:: and Meshtastic:: themselves, the same way they do for
+// nodes: those namespaces are compiled on every board, this slot exists on
+// one, and the no-op branch below is what keeps ui_lora.cpp board-agnostic.
+struct ChannelRow {
+    Proto    proto;
+    char     name[24];
+    uint8_t  hash;
+    uint32_t frames;    // frames this key has opened since boot
+    uint32_t lastMs;    // when the last one landed; 0 = never
+    bool     builtIn;   // Public, or a Meshtastic preset: cannot be muted or dropped
+    bool     enabled;
+    bool     derived;   // MeshCore hashtag: the key comes from the name
+    uint16_t keyBits;   // 128 or 256 -- and 256 does not fit in a byte; 0 = no encryption (ham mode)
+};
+uint8_t channelRowCount();
+bool    channelRow(uint8_t i, ChannelRow& out);
+// Mute or unmute the key on that row and write the list back to the store.
+// A built-in row is left alone; returns false when nothing changed.
+bool    toggleChannelRow(uint8_t i);
+// Built-in keys that are NOT listed because nothing has arrived on them --
+// twenty-eight Meshtastic presets on a quiet band. Counted, not hidden: the
+// view says how many there are.
+uint8_t channelsQuietBuiltIn();
+// How many of each table are the user's, and the room there is. For the one
+// line on screen that says whether the list can still grow.
+void    channelCapacity(uint8_t& mcUsed, uint8_t& mcMax, uint8_t& mtUsed, uint8_t& mtMax);
+
 // The spectrum from SWEEP: one value per bin from 863.0 to 870.0 MHz in
 // 50 kHz steps, as dBm + 150 (0 = nothing yet). `hold` keeps the loudest
 // reading with a slow decay. Returns the bin count.
@@ -99,6 +128,19 @@ inline const Stats& stats() { static Stats s = {}; return s; }
 inline uint8_t nodeCount() { return 0; }
 inline uint8_t nodeOrder(uint8_t*, uint8_t) { return 0; }
 inline bool nodeAt(uint8_t, Nodes::Node&) { return false; }
+struct ChannelRow {
+    Proto    proto;
+    char     name[24];
+    uint8_t  hash;
+    uint32_t frames, lastMs;
+    bool     builtIn, enabled, derived;
+    uint16_t keyBits;
+};
+inline uint8_t channelRowCount() { return 0; }
+inline bool channelRow(uint8_t, ChannelRow&) { return false; }
+inline bool toggleChannelRow(uint8_t) { return false; }
+inline uint8_t channelsQuietBuiltIn() { return 0; }
+inline void channelCapacity(uint8_t& a, uint8_t& b, uint8_t& c, uint8_t& d) { a = b = c = d = 0; }
 static const uint8_t SPECTRUM_BINS = 141;
 inline uint8_t spectrum(uint8_t*, uint8_t*, uint8_t) { return 0; }
 inline uint32_t spectrumSweeps() { return 0; }

@@ -6,6 +6,7 @@
 // stay in main.cpp, which reads these getters after a change.
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include "signatures.h"   // Confidence
 
 namespace Settings {
@@ -261,6 +262,23 @@ namespace Settings {
     void        cycleLoraMode();
     uint8_t     loraFocus();
     void        setLoraFocus(uint8_t ix);
+
+    // The channel keys the two mesh decoders hold, as one opaque blob. The
+    // record format is Lora::Chan's business (include/lora_channels.h); this
+    // is only the NVS entry, so that the store stays the one place that talks
+    // to Preferences.
+    //
+    // ONE entry for the whole list, for the reason the egg-hunt progress is
+    // packed into one: thirty channels would be thirty entries in a store
+    // with a few hundred free, and a channel list is not what that budget is
+    // for. Key "loraChans" -- 9 characters, inside NVS's limit of 15, and no
+    // other key in settings.cpp begins with those letters.
+    size_t      loraChannels(uint8_t* out, size_t cap);        // bytes read; 0 = nothing stored
+    // n == 0 removes the entry. False when the store would not take it -- a
+    // full NVS partition, say. That has to be reported rather than swallowed:
+    // a write that silently fails is a board that silently forgets its keys
+    // again, which is the whole bug this entry exists to fix.
+    bool        setLoraChannels(const uint8_t* rec, size_t n);
 
     // ---- STATUS LIGHT ----------------------------------------------------
     // The RGB LED on the back of the 2.8" CYD. See status_light.h for the

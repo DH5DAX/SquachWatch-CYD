@@ -59,6 +59,11 @@ uint16_t dutyPermille(const Node& n, uint32_t now) {
 static void noteMeshtastic(const Packet& pk, uint32_t now) {
     Meshtastic::Decoded d;
     if (!Meshtastic::decode(pk, d)) return;
+    // Which key opened it, counted here and nowhere else: note() runs once per
+    // frame off the air, while decode() runs again for every row the LIST and
+    // CHANNELS views redraw. A counter inside the decoder would measure the
+    // screen's refresh rate.
+    if (d.haveData) Meshtastic::noteChannelHeard(d.channelIdx, now);
     Node& n = *get(Proto::MESHTASTIC, d.hdr.from, now);
     if (!n.tag[0]) Meshtastic::nodeId(d.hdr.from, n.tag);
     heard(n, pk, now);
@@ -93,6 +98,7 @@ static void noteMeshtastic(const Packet& pk, uint32_t now) {
 static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
     MeshCore::Decoded d;
     if (!MeshCore::decode(pk, d)) return;
+    if (d.haveChannel) MeshCore::noteChannelHeard(d.channelIdx, now);   // opened, not necessarily text; see noteMeshtastic
     const MeshCore::Frame& f = d.f;
     // Adverts name their sender in full. Everything else names only the
     // last relay (the path's newest hash) or a destination, which is not

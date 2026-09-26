@@ -1510,10 +1510,10 @@ static void enterDex() {
     transitionStart = millis();
     uiDexInit(*canvas);
 }
-static void enterLora() {
+static void enterLora(LoraView view = LoraView::LIST) {
     state = AppState::LORA;
     transitionStart = millis();
-    uiLoraInit(*canvas);
+    uiLoraInit(*canvas, view);
 }
 
 static void enterSquadUpdate() {
@@ -5321,6 +5321,7 @@ void loop() {
                         case SettingsRow::DEX:          enterDex(); break;
 #if defined(CROWPANEL7)
                         case SettingsRow::LORA:         enterLora(); break;
+                        case SettingsRow::LORA_CHANNELS: enterLora(LoraView::CHANS); break;
                         case SettingsRow::LORA_MODE:
                             Settings::cycleLoraMode();
                             Lora::setMode((Lora::Mode)Settings::loraMode());

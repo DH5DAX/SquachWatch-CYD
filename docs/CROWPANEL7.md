@@ -5,8 +5,8 @@ An ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB octal PSRAM) behind an
 is not a CYD: there is no SPI display bus at all, the backlight is a command
 to a helper MCU, the USB-C socket reaches UART0 through a CH340K, and the
 SD slot shares its pins with the audio amplifier through a switch on the
-board. One unit tested, board revision V1.2 or later (the helper MCU at
-I2C 0x30 identifies those).
+board. One unit tested, board revision V1.3 or later (the helper MCU at
+I2C 0x30 rules out V1.0, and BUSY on a direct GPIO rules out V1.2).
 
 ## Build and install
 
@@ -97,11 +97,14 @@ section the state of the code. Bring-up prints to the console what it
 found -- BUSY falling after the reset pulse, the chip's version string,
 which TCXO voltage started the oscillator -- and `LORA` at any time repeats
 it with the counters. `LORA LIST` names the profiles, `LORA FOCUS n` parks
-on one, `LORA SURVEY` walks them, `LORA SPECTRUM` sweeps the band,
-`LORA HEX` dumps every frame, `LORA TAP` streams LoRaTap lines that
-`tools/loratap2pcap.py` makes a Wireshark capture of. On the screen it is
-SETTINGS > SYSTEM > LORA, with LORA MODE and LORA PROFILE beside it; the
-status line on that screen cycles the mode with a tap.
+on one, `LORA SURVEY` walks them, `LORA SPECTRUM` sweeps the band into the
+STATS view and `LORA SWEEP` prints one pass of it on the console,
+`LORA NODES` prints the node table, `LORA CHAN` lists the channel keys and
+takes more (`LORA CHAN MC #tag` needs no key at all: the tag *is* the key,
+LORA.md section 3.13), `LORA HEX` dumps every frame, `LORA TAP` streams
+LoRaTap lines that `tools/loratap2pcap.py` makes a Wireshark capture of. On
+the screen it is SETTINGS > SYSTEM > LORA, with LORA MODE and LORA PROFILE
+beside it; the status line on that screen cycles the mode with a tap.
 
 The slot and the SD card cannot both answer, and the firmware does not try
 to tell which one is fitted beyond the version register: with K1 on the
@@ -109,10 +112,27 @@ card, the LORA row reads NO MODULE and nothing else changes.
 `crowpanel7-loraprobe` is the product build with the hex dumps on and
 FOCUS as the starting mode, for the bench.
 
-Nothing here has run on the hardware yet. The list of what only the board
-can answer -- the DIP switch's labels, the module's band, the TCXO's
-voltage, the interrupt on GPIO 20 while the panel refreshes -- is at the
-end of LORA.md.
+This has now run, on one unit with Elecrow's module in the slot: K1 on
+S1=0 / S0=1, which is the position the silkscreen calls "wireless module";
+version register `SX1261 V2D 2D02`; the TCXO started at 1.8 V on the first
+try; received frames about 0.4 ppm off frequency; and MeshCore decoded at
+869.618 MHz SF8/62.5k, with the Public channel readable on its built-in key
+and adverts giving names, roles and positions. Nothing Meshtastic was heard
+at that location, which is one location on one afternoon and no more than
+that. A wrongly set K1 is recognisable rather than silent: the bring-up
+prints `BUSY fell after reset` with an *empty* version register, because only
+SCK/MISO/MOSI go through the mux while RESET and BUSY are direct GPIOs, and
+`crowpanel7-probe` prints `SD raw CMD0: R1 = 0x00 (line held low: K1 is on
+the I2S position)`.
+
+One known defect: the `noise` figure reads a constant −128 dBm in SURVEY mode
+and a correct −100 dBm in FOCUS. SURVEY samples it in the branch where a CAD
+detected nothing, and there the chip is back in standby with the receiver off,
+so the instantaneous-RSSI register reads its rail. It blocks the CAD tuning,
+which is set against the floor. What is still open -- the module's band, the
+loss at 433 MHz, the CAD thresholds, the rail under transmit (nothing
+transmits yet), the interrupt latency on GPIO 20 while the panel refreshes --
+is at the end of LORA.md.
 
 ## Validation and remaining checks
 
@@ -121,16 +141,18 @@ continuous soak: the panel and touch, WiFi sniffing and BLE scanning with
 the mesh advertising, a first detection (an AirTag) four seconds after
 boot, the WiFi network list and the password keyboard, and the WiFi update
 boot check against the site. Frame rate 17–29 fps depending on the screen,
-about 80 KB of internal RAM free with both radios up.
+about 80 KB of internal RAM free with both radios up. A later bench session
+added the LoRa module: bring-up, a band sweep, and MeshCore frames decoded,
+adverts and Public-channel messages included.
 
 Not yet exercised: an actual over-the-air install (there is no published
-build for this target), Bluetooth updates, the SD log (K1 on the tested
-unit selects the amplifier), the LoRa slot (no module on the tested unit),
-a multi-day soak, a second unit. The
-`crowpanel7-paneltest` and `crowpanel7-probe` environments are bench
-builds for the next person: a static test picture with the radios off or
-on, and a report of the helper MCU, clock chip, card slot and a WiFi scan
-through the sniffer's own driver.
+build for this target), Bluetooth updates, the SD log (K1 on the tested unit
+now selects the wireless module, and the card cannot share those pins),
+transmitting on LoRa, receiving anything at 433 MHz, a multi-day soak, a
+second unit. The `crowpanel7-paneltest` and `crowpanel7-probe` environments
+are bench builds for the next person: a static test picture with the radios
+off or on, and a report of the helper MCU, clock chip, card slot and a WiFi
+scan through the sniffer's own driver.
 
 ## References
 

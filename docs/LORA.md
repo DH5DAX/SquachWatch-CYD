@@ -4,22 +4,25 @@ What the Elecrow LoRa module can hear, decode and send, and how it could make
 SquachWatch a LoRa pocket knife for detection, classification, decoding and
 for the people who run LoRa networks.
 
-This is research, not code. It was written on 2026-09-26 against what was
-current that day: Meshtastic firmware 2.8.x, MeshCore 1.17.1, RadioLib 7.7.1,
-LoRaWAN Regional Parameters RP002-1.0.5 and MeshCom 4.35. Where a fact comes
-from a project's source code rather than its docs, the source was read. The
-values checked by recomputing them are marked **checked**. Anything that could
-not be confirmed from a primary source is marked **unverified**. Some questions
-only the board itself can answer; those are collected in
-[Measure first](#10-measure-first).
+This began as research rather than code. It was written on 2026-09-26 against
+what was current that day: Meshtastic firmware 2.8.x, MeshCore 1.17.1,
+RadioLib 7.7.1, LoRaWAN Regional Parameters RP002-1.0.5 and MeshCom 4.35.
+Where a fact comes from a project's source code rather than its docs, the
+source was read. The values checked by recomputing them are marked
+**checked**. Anything that could not be confirmed from a primary source is
+marked **unverified**. Some questions only the board itself can answer; those
+are collected in [Measure first](#10-measure-first), and the ones a bench
+session on 2026-09-26 answered are marked there as answered, with the reading
+that answered them.
 
 ## What is built
 
 The research below became code on 2026-09-26, in the `crowpanel7` build
-(`-DSQUACH_LORA`), and none of it has met the board yet: it compiles, the
-decoders pass their desktop tests against published vectors, and
-[Measure first](#10-measure-first) is still the list of what only the
-hardware can answer.
+(`-DSQUACH_LORA`), and met the board the same day: the decoders pass their
+desktop tests against published vectors, and the radio has now been listened
+to. What the hardware said is in
+[What the bench showed](#what-the-bench-showed) at the end of this section;
+[Measure first](#10-measure-first) is what is still open.
 
 - **Bring-up** (`lora_radio.cpp`): a reset pulse and a raw read of the
   version register before RadioLib, then the TCXO voltages tried in the
@@ -33,23 +36,103 @@ hardware can answer.
 - **Decoders**, each standalone with a host test: Meshtastic, MeshCore,
   LoRaWAN, LoRa APRS, MeshCom and FANET. The keys the user holds go in
   through `Meshtastic::addChannel`, `MeshCore::addChannel` and
-  `LoRaWAN::addSession`; a settings screen for them is still to do.
+  `LoRaWAN::addSession`, or over the console with `LORA CHAN`; LoRaWAN
+  sessions are still console-only and still lost at a restart.
+- **The channel list, kept** (`lora_channels.cpp`): the mesh channels a user
+  adds go to the settings store as one NVS entry and come back inside
+  `Lora::begin()`, before the radio task exists, so the first frame after a
+  boot already decrypts. A MeshCore hashtag channel is stored as its **tag**,
+  not as sixteen bytes of key, because the key is derivable and a tag survives
+  a change in how it is derived; a channel somebody handed a key over for
+  stores the key. `LORA CHAN DROP`, `MUTE`, `GROUP` and `CLEAR` all write the
+  stored copy, and `LORA CHAN GROUP NRW` puts the eleven open regional channels
+  in with one command instead of eleven. Host-tested end to end through the
+  emulator's NVS file (`test/lora_channels_test.cpp`); **not yet confirmed by a
+  real power cycle.**
 - **The LORA screen** (`ui_lora.cpp`): LIST, FRAME, NODES with the sysop
-  flags, CHANNEL with the counters and the spectrum. LORA MODE and LORA
-  PROFILE on the SYSTEM page.
+  flags, STATS with the counters and the spectrum, and CHANNELS -- the keys
+  the decoders hold, which have opened anything, and a tap to mute one. LORA
+  MODE, LORA PROFILE and LORA CHANNELS on the SYSTEM page. The panel has no
+  keyboard, so it cannot add a channel and does not pretend to: that is
+  `LORA CHAN` on the console, and the view says so at its foot.
 - **Not built**: the FSK profiles (OGN, ADS-L, wM-Bus), transmitting, the
   `LORA_TRACKER` detection, and the LoRaWAN downlink chase and beacon
   scheduling; the profiles for RX2 and the beacon exist and FOCUS can park
   on them.
 
+### What the bench showed
+
+One afternoon, one unit, one location: an Elecrow CrowPanel Advance 7.0 with
+Elecrow's wireless module in the slot and the module's own antenna on the
+pigtail. Everything in this subsection came off that board, in the console's
+own words where those are the evidence; where a line is a deduction from a
+reading rather than the reading, it says so.
+
+- **The slot answers.** `BUSY fell after reset`, version register
+  `SX1261 V2D 2D02` (which names an SX126x and nothing finer: item 3 of
+  [Measure first](#10-measure-first)), then `begin with TCXO 1.8 V: err 0,
+  device errors 0x000`. 1.8 V is the first voltage the bring-up tries, so the
+  oscillator started on the first attempt.
+- **K1 belongs on S1 = 0, S0 = 1**, which is the position the silkscreen calls
+  "wireless module"; the module answered as soon as it was set there. See
+  [the DIP switch](#the-dip-switch-and-why-there-is-no-sd-card) for what a
+  wrongly set switch looks like, because it does not look like silence.
+- **This unit is V1.3 or newer**, deduced rather than read: BUSY answered a
+  reset while the SPI lines were routed away from the module, so BUSY is a
+  direct GPIO and not the mux line it is on V1.2.
+- **RadioLib 7.7.1 builds and runs on arduino-esp32 2.0.14**, which was the
+  one thing that could have stopped all of it (item 11).
+- **MeshCore decodes at this location**, on the MeshCore EU profile
+  (869.618 MHz, BW62.5, SF8, sync 0x12): frames at −63 to −73 dBm, SNR 11 to
+  12.5 dB, payload types ADVERT, GRP_TXT, REQ, ANON_REQ and PATH, route types
+  `flood` and `tflood`, relay paths of up to eleven hops, airtimes from 345 to
+  1557 ms. **The Public channel decrypted** with the built-in key, so group
+  messages were readable without anyone typing anything in. One advert gave
+  `REPEATER "DE-NW-HSK-AR-DL1TMA" 51.3435 8.0845`: name, role and position out
+  of a frame that needs no key at all.
+- **Nothing Meshtastic was heard**, on any of its profiles, at this location.
+  One location on one afternoon is not a statement about Meshtastic, or about
+  the German presets in [section 3.1](#31-meshtastic). It is a reason to keep
+  every Meshtastic profile in the survey mask, not to drop them.
+- **The band, from `LORA SWEEP`:** a floor around −100 dBm across
+  863–870 MHz, with −63 dBm at 869.5–869.7 (the MeshCore traffic above),
+  −85 dBm at 866.8–867.0 and −84 dBm at 863.9–864.1. Nothing was decoded at
+  either of the quieter two: they are energy, unidentified.
+- **The frequency offset is small.** `ferr` ran between −312 and −351 Hz on
+  every frame at 869.618 MHz, about 0.4 ppm. No profile needs a frequency
+  trim, and a frame arriving far off that figure is now a signal in itself.
+
+**A defect the bench found: the noise floor is wrong in SURVEY.** The `noise`
+figure in the `LORA` status line reads a constant −128 dBm in SURVEY, and a
+correct −100 dBm in FOCUS, matching the sweep. The cause is in
+`lora_sniffer.cpp`. `noiseSample()` reads `LoraRadio::rssiNow()`, which is
+`SX126x::getRSSI(false)`, which is the chip's GetRssiInst command, and that
+measures only while the receiver is actually running. FOCUS holds the chip in
+continuous RX (`startReceive()` with `RX_TIMEOUT_INF`), so its reading is
+real. SURVEY samples in the one place the chip is *not* receiving: the branch
+taken when a CAD finishes with no detection. `startCad()` asks for
+`RADIOLIB_SX126X_CAD_GOTO_RX`, which is "after CAD is done, go to Rx mode if
+activity is detected" (RadioLib's own note at `SX126x_commands.h:262`), so
+with no detection the chip is back in STDBY_RC with the receiver off. −128 dBm
+can only be a raw 0xFF: RadioLib returns `raw / -2.0`, and `lroundf` takes
+−127.5 to −128. The register is reading its rail. The slow floor in
+`noiseSample()` then holds it there, because it drops instantly and climbs at
+most 1 dB per sample: one standby reading pins the figure for the next half
+minute of good ones, and SURVEY re-pins it every round. Nothing else uses the
+number yet, so nothing else is wrong; the fix is to sample where the receiver
+is on, or not to sample in that branch at all. Until it is fixed, item 7 (CAD
+tuning) cannot be worked on, because a CAD threshold is set against the floor.
+
 ## The short version
 
-- **The module is a Semtech SX1262** with a TCXO and an RF switch driven by
-  DIO2, sold for 868 or 915 MHz. It has one receiver, which listens on one
-  frequency, one bandwidth, one spreading factor, one sync word and one IQ
-  polarity at a time. A LoRaWAN gateway hears 8 channels at every spreading
-  factor at once; this board hears a slice. Everything below is designed
-  around that.
+- **The module is an SX126x** with a TCXO and an RF switch driven by DIO2,
+  sold for 868 or 915 MHz. Elecrow calls it an SX1262; the version register
+  reads `SX1261 V2D 2D02`, which is what every SX1262 also reads, so the part
+  is settled no further than the family (item 3). It has one receiver, which
+  listens on one frequency, one bandwidth, one spreading factor, one sync word
+  and one IQ polarity at a time. A LoRaWAN gateway hears 8 channels at every
+  spreading factor at once; this board hears a slice. Everything below is
+  designed around that.
 - **LoRa and the SD card cannot be used at the same time.** The DIP switch K1
   routes GPIO 4/5/6 to one or the other. Captures have to go to flash, which
   has about 7.4 MB spare on this board.
@@ -61,7 +144,15 @@ hardware can answer.
     MeshCom, FANET, OGN and ADS-L.
   - LoRaWAN headers, join requests and Class B beacons.
 - **What it can decode with keys the user holds:** LoRaWAN payloads from the
-  user's own devices, and private Meshtastic and MeshCore channels.
+  user's own devices, and private Meshtastic and MeshCore channels. Which keys
+  are secrets and which are only names is
+  [section 3.13](#313-channels-and-keys); the short answer is that a MeshCore
+  hashtag channel has no secret in it at all.
+- **What has actually been heard on this board:** MeshCore on 869.618 MHz,
+  adverts and Public-channel group messages, at one location on 2026-09-26. No
+  other network has been confirmed on the air yet; the other decoders have
+  only published vectors behind them. See
+  [What the bench showed](#what-the-bench-showed).
 - **What it cannot decode:** Meshtastic PKI direct messages, MeshCore direct
   messages, LR-FHSS, Sigfox uplinks, mioty, Amazon Sidewalk, and the content
   of FLARM.
@@ -81,10 +172,10 @@ hardware can answer.
 | | |
 |---|---|
 | Product | "Wireless module for CrowPanel Advanced Series", variant SX1262 (LoRa). The SKU is DAC0010, which covers every variant. It is a +$6.55 add-on on the 7.0 product page |
-| Chip | Semtech SX1262, per Elecrow. No module schematic is published, and the part is **unverified** beyond Elecrow's word; reading the chip's version string at boot settles it |
+| Chip | Semtech SX1262, per Elecrow. No module schematic is published. The version register reads `SX1261 V2D 2D02`, which confirms an SX126x and nothing finer, because every SX1262 reports as an SX1261 (item 3 of [Measure first](#10-measure-first)). 1261 against 1262 is still **unverified**, and only matters for transmitting |
 | Bands | Elecrow lists only 868 MHz and 915 MHz versions. There is no 433 MHz version |
 | RF switch | DIO2: low means receive, high means transmit. RadioLib's `begin()` already sets `setDio2AsRfSwitch(true)` |
-| Oscillator | A TCXO powered from DIO3. Elecrow's ESP32-S3 examples and Meshtastic both use 3.3 V, while Elecrow's ESP32-P4 example uses 1.6 V. The datasheet wants VDD above VTCXO + 200 mV, so 3.3 V cannot be fully met on a 3.3 V rail. Measure it |
+| Oscillator | A TCXO powered from DIO3. Elecrow's ESP32-S3 examples and Meshtastic both use 3.3 V, while Elecrow's ESP32-P4 example uses 1.6 V. The datasheet wants VDD above VTCXO + 200 mV, so 3.3 V cannot be fully met on a 3.3 V rail. **1.8 V starts it** on the tested unit (`err 0, device errors 0x000`), and received frames sit about 0.4 ppm off frequency, so it is doing its job (**checked**) |
 | TX power | +22 dBm is the chip maximum. No module figure is published |
 | Antenna | IPEX-1 (U.FL) connector, 10 cm pigtail, 3.5 dBi antenna |
 
@@ -92,15 +183,17 @@ hardware can answer.
 
 The board has the STC8 helper at 0x30, so it is a 7.0 **V1.2 or later**. V1.0
 used a GPIO expander there, and its LoRa chip select is on GPIO 0 instead
-of 8.
+of 8. BUSY answers a reset on the tested unit even when the SPI lines are
+routed away from the module, which puts BUSY on a direct GPIO and makes that
+unit **V1.3 or later** (**checked**; see below).
 
 | Module pin | ESP32-S3 GPIO | Path |
 |---|---|---|
 | SCK / MISO / MOSI | 5 / 4 / 6 | CH486F mux U11 (shared with the SD card and I2S) |
 | NSS | **8** (V1.2+; V1.0 used 0) | direct |
-| DIO1 (IRQ) | 20 | CH486F mux U9 |
-| NRESET | 19 | CH486F mux U9 |
-| BUSY | 2 | direct on V1.3+, through U9 on V1.2 |
+| DIO1 (IRQ) | 20 | direct on V1.3+ (the V1.2 schematic draws it through U9) |
+| NRESET | 19 | direct on the tested unit (**checked**, below) |
+| BUSY | 2 | direct on the tested unit (**checked**, below), through U9 on V1.2 |
 
 This is Elecrow's own code for V1.2 to V1.5:
 
@@ -112,6 +205,16 @@ SX1262 radio = new Module(8 /*NSS*/, 20 /*DIO1*/, 19 /*NRST*/, 2 /*BUSY*/, SPI);
 Watch out for the net names on the 7.0 V1.2 schematic: `IO2_W_CS` and
 `IO8_BUSY` are the wrong way round. The 4.3" schematics and Elecrow's code both
 say NSS is 8 and BUSY is 2.
+
+**What the mux actually switches, on the tested unit: only SCK, MISO and
+MOSI.** With K1 in the wrong position the bring-up printed `BUSY fell after
+reset` together with an empty version register. The reset pulse reached the
+chip and the chip answered on BUSY, so RESET and BUSY are direct GPIOs; the
+register read came back all zeros because those three SPI lines were routed
+elsewhere. That contradictory pair is the signature of a wrongly set switch,
+and it is worth knowing, because "BUSY fell after reset" on its own reads like
+success. DIO1 sits with RESET and BUSY by Elecrow's V1.3+ wiring, which this
+measurement does not itself prove.
 
 ### The DIP switch, and why there is no SD card
 
@@ -125,15 +228,21 @@ muxes, and no GPIO can change it. It works like this:
 | 1 | 0 | SD card | nothing |
 | 1 | 1 | SD card and mic | SD card and mic |
 
-Elecrow staff say the same on their forum: LoRa and the SD card cannot coexist.
+On the tested unit, which is a V1.3 or later, the module answered as soon as
+K1 was set to **S1 = 0, S0 = 1**, and the silkscreen labels that position
+"wireless module" (**checked**). Elecrow staff say the same about the rest on
+their forum: LoRa and the SD card cannot coexist.
 
 What that means for the firmware:
 
 - **Probe at boot for whichever one is connected.** The SD card answers a raw
-  CMD0 with 0x01, as `crowpanel7_probe.cpp` already does. An SX126x answers a
-  register read of 0x0740/0x0741 with 0x14 0x24 straight after reset (its
-  default sync word). Show the result in DIAGNOSTICS so a wrongly set switch is
-  obvious.
+  CMD0 with 0x01, as `crowpanel7_probe.cpp` already does; 0x00 means the line
+  is held low, and 0xFF that nothing is on the bus. With K1 still on the I2S
+  position the probe printed `SD raw CMD0: R1 = 0x00 (line held low: K1 is on
+  the I2S position)`, which is how the switch was found rather than guessed.
+  The LoRa side reads the version register at 0x0320 instead of the sync word,
+  so `SX1261 V2D 2D02` and an all-zero read are the two answers to tell apart.
+  Both go to the console, and DIAGNOSTICS has the LORA row.
 - **Log to flash instead of the card.** The 16 MB part is empty after the
   coredump partition (0x840000 to the end), so there is roughly 7.4 MB for a
   capture ring.
@@ -154,9 +263,10 @@ What that means for the firmware:
   build hard-codes chip select 0, which only fits V1.0; Meshtastic issue
   #11393, still open, asks for a V1.2+ target. MeshCore has no CrowPanel
   Advance port at all.
-- **RadioLib 7.7.1 on arduino-esp32 2.0.14 is untested.** Elecrow's V1.5
-  examples use 7.7.1, but RadioLib's CI builds against the 3.x core. It has to
-  be compiled before anything else.
+- **RadioLib 7.7.1 on arduino-esp32 2.0.14 works.** Elecrow's V1.5 examples
+  use 7.7.1, but RadioLib's CI builds against the 3.x core, so this was the
+  first thing tried: it compiles, brings the chip up and receives
+  (**checked**, item 11).
 
 ---
 
@@ -399,7 +509,9 @@ companions never do.
   (**checked**).
 - **Hashtag channels:** the key is SHA256("#name")[:16]; for example `#test`
   gives hash 0xD9 (**checked**). Anyone who knows the name can read the
-  channel, and the user can type in the names they use.
+  channel, and the user can type in the names they use -- which is also why
+  the settings store keeps the *tag* rather than the derived key
+  ([section 3.13](#313-channels-and-keys), "What is kept, and in what form").
 - **Private traffic:** DMs, requests and paths use X25519 between the two
   nodes and cannot be read by a third party.
 
@@ -723,6 +835,110 @@ pretending to decode it:
 - **mioty:** it is not LoRa.
 - **Amazon Sidewalk:** encrypted and US-only.
 - **433 MHz OOK remotes and weather stations:** the chip has no OOK receive.
+
+### 3.13 Channels and keys
+
+The bench's most useful lesson was not about radio. The one thing between a
+user and readable traffic is knowing which keys are not secrets. There are
+three kinds, in order of how little they ask of anyone.
+
+**No key at all.** Nothing to type and nothing to be given:
+
+- **Meshtastic:** the whole 16-byte header of every frame, on every channel,
+  private ones included: who, to whom, packet id, hops, relayer.
+- **MeshCore:** adverts, which carry the public key, the name, the role, the
+  position and the clock; the relay path of every flood; and TRACE's SNR per
+  hop. The advert the bench caught,
+  `REPEATER "DE-NW-HSK-AR-DL1TMA" 51.3435 8.0845`, is a plaintext signed
+  frame, not a decryption.
+- **The plaintext networks entire:** LoRa APRS, MeshCom, FANET, OGN, ADS-L.
+- **LoRaWAN:** headers, join requests and Class B beacons.
+
+**Keys that are published, and that the firmware therefore carries.** These
+are built in because they are in every install of the software that uses them,
+and a decoder without them is a decoder that reads nothing:
+
+| Network | Key | Channel hash | Covers |
+|---|---|---|---|
+| Meshtastic default | `AQ==`, which expands to `d4f1bb3a20290759f0bcffabcf4e6901` | one per channel name: LongFast 0x08, MediumFast 0x1F, ShortSlow 0x77, the rest in [3.1](#31-meshtastic) | every default-key channel: text, names, positions, telemetry, traceroutes |
+| MeshCore Public | `8b3387e9c5cdea6ac9e5edbaa115cd72` | 0x11 | the Public channel, where most MeshCore group traffic is |
+
+Both are **checked** by recomputation, and the MeshCore one is now checked on
+the air as well: the bench read Public-channel group messages with it.
+
+**Hashtag channels: the name is the key.** A MeshCore hashtag channel has no
+secret in it at all. The key comes from the name, and the channel hash from
+the key:
+
+```
+key  = SHA256("#name")[0..15]
+hash = SHA256(key)[0]
+```
+
+So `#test` is not a channel whose key somebody has to hand out. `#test` *is*
+the key, and anyone who knows the tag can read the channel; that is what the
+design is for, and it is how a region opens a channel to whoever turns up.
+`LORA CHAN MC #tag` takes no second argument for that reason. The tag is
+hashed exactly as typed, `#` included and case as given, so `#Bochum` is a
+different channel from `#bochum`.
+
+Because a tag is not a secret, a *list* of tags is not a secret either, and the
+eleven below are in the firmware as the **NRW group**: `LORA CHAN GROUP NRW`
+adds all of them at once, `LORA CHAN GROUP` lists the groups, and the stored
+form is eleven ordinary hashtag entries afterwards -- so any one of them can be
+dropped or muted like any other. The open channels this board is set up for,
+with their hashes recomputed here (**checked**), and pinned against the group's
+own table in `test/lora_channels_test.cpp`:
+
+| Channel | Hash | Channel | Hash |
+|---|---|---|---|
+| `#test` | 0xD9 | `#essen` | 0x46 |
+| `#wardriving` | 0x81 | `#gelsenkirchen` | 0x59 |
+| `#hamradio` | 0xB3 | `#muenster` | 0x07 |
+| `#nrw` | 0xD0 | `#muensterland` | 0xF6 |
+| `#bochum` | 0x6C | `#darc-i21` | 0x37 |
+| `#dortmund` | 0x34 | `#rheine` | 0x6C |
+
+The hash is one byte, so channels collide, and in a real list they do:
+`#bochum` and `#rheine` both come out 0x6C. That is not a clash to resolve. A
+frame carries the hash as a hint, and the two-byte HMAC in front of the
+ciphertext decides which key was actually right, so a collision costs one
+extra decryption attempt and nothing else. It is worth saying on screen all
+the same, so that a quiet channel is not mistaken for a broken one.
+
+**Keys that are secrets, typed in by hand.** Private Meshtastic channels,
+private MeshCore channels, and LoRaWAN session keys or AppKeys for the user's
+own devices. `LORA CHAN MC|MT <name> <key>` takes 16 or 32 bytes as base64 or
+hex, `LORA CHAN` lists what is loaded, `LORA CHAN DROP MC|MT <name>` forgets
+one, `LORA CHAN MUTE MC|MT <name>` keeps it in the list but stops trying it,
+`LORA CHAN GROUP <name>` adds a named set of open hashtag channels, and
+`LORA CHAN CLEAR` goes back to the built-ins. All of them work with no module
+in the board: the keys are the decoders', not the radio's. The firmware guesses no
+keys, ever, and holds no key it was not given or could not derive from a name.
+
+**What is kept, and in what form.** The mesh channels survive a reboot
+(`lora_channels.cpp`, one NVS entry under `loraChans`), and the form differs by
+kind for a reason:
+
+| Kind | Stored | Why |
+|---|---|---|
+| MeshCore `#tag` | the tag | The key is not an input, it is `SHA256("#tag")[0..15]`. Re-deriving it at every boot keeps the entry readable, keeps it short, and means a corrected or changed derivation fixes itself instead of leaving a stored key that quietly opens nothing. |
+| MeshCore with a key | the 16 bytes | Nothing to derive from. |
+| Meshtastic | name and key | Same: a Meshtastic key is a secret somebody hands over. |
+
+A muted channel is stored muted, so a channel switched off on the panel is
+still off after a power cycle. The built-in keys -- MeshCore's Public and the
+Meshtastic presets -- are never stored: they come from constants in the
+decoders, so a firmware that corrects one is believed over a saved copy.
+LoRaWAN sessions are **not** kept yet; they are still console-only and still
+go at a restart.
+
+**What no key opens.** MeshCore direct messages, requests and paths, and
+Meshtastic PKI direct messages: both are X25519 between two nodes, and a third
+party cannot read them however many keys it is handed.
+
+Which of these it is lawful to read is [section 8](#8-the-law), and the answer
+is not simply "the ones we have keys for".
 
 ---
 
@@ -1071,27 +1287,69 @@ DEX cards for the protocol types, and alerts only for `LORA_TRACKER`.
 
 ## 10. Measure first
 
+Eleven questions as they were written on 2026-09-26, before any of this met
+the board. The bench session that afternoon answered four of them (1, 2, 4 and
+11), showed one to be the wrong question (3), half-answered one (8) and turned
+one into a defect to fix first (7). The other four are untouched, and an item
+that still says open is still open.
+
 1. **K1 on this board:** which switch is S0 and which is S1, and which way is
-   ON. Check against the silkscreen and with a continuity test on the P5/P21
-   pads.
+   ON. **Answered:** the wireless position is **S1 = 0, S0 = 1**, which is
+   what the silkscreen calls "wireless module", and the module answered as
+   soon as the switch was set there. No continuity test on the P5/P21 pads was
+   needed in the end. A wrong position is recognisable from the console
+   without a meter: `crowpanel7-probe` prints `SD raw CMD0: R1 = 0x00 (line
+   held low: K1 is on the I2S position)`, and the LoRa bring-up prints `BUSY
+   fell after reset` together with an empty version register.
 2. **Board revision:** V1.2 (I2S mic, BUSY through the mux) or V1.3+ (PDM
-   mic, BUSY direct).
-3. **The module:** is it really an SX1262 (version string)? Is it matched for
-   868 or 915?
+   mic, BUSY direct). **Answered: V1.3 or newer.** BUSY answered a reset while
+   the SPI lines were routed away from the module, so BUSY is direct.
+3. **The module:** ~~is it really an SX1262 (version string)?~~ **Answered, and
+   the question was wrong.** The version register cannot tell an SX1261 from an
+   SX1262: RadioLib 7.7.1 defines `RADIOLIB_SX1262_CHIP_TYPE` as the string
+   `"SX1261"` and says why at `src/modules/SX126x/SX1262.h:15`: *"this should
+   really be 2, however, it seems that all SX1262 devices report as SX1261"*.
+   The bench read `SX1261 V2D 2D02` off this module, which therefore says only
+   that it is an SX126x. Settling 1261 against 1262 needs the silkscreen,
+   Elecrow's own part number or a transmit measurement, and it matters only
+   for transmitting, where the two want different PA configurations and differ
+   by 7 dB of maximum power. Is it matched for 868 or 915? **Still open**, and
+   answering it properly needs a transmit measurement too.
 4. **TCXO voltage:** does `begin()` succeed at 1.6, 1.8 and 3.3 V? What
-   frequency offset does it show against a known transmitter?
-5. **Off-band receive:** how many dB are lost at 433 MHz?
+   frequency offset does it show against a known transmitter? **Answered
+   enough:** `begin with TCXO 1.8 V: err 0, device errors 0x000`, at the first
+   voltage the bring-up tries, so 3.3 V and 1.6 V were never reached and
+   remain untested. The offset against real MeshCore traffic at 869.618 MHz
+   was −312 to −351 Hz on every frame, about 0.4 ppm: no trim needed
+   anywhere.
+5. **Off-band receive:** how many dB are lost at 433 MHz? **Open.** Nothing
+   has been tried there: the 433 profiles are out of the survey mask by
+   default for exactly this reason, and `LORA ALL` puts them in.
 6. **Sync words:** which of 0x12, 0x34, 0x2B and 0xF1 leak through a filter
-   set to another?
+   set to another? **Open.** The counters that would show a leak (header
+   errors and stray preambles) are in the `LORA` status line, but the
+   measurement wants a known transmitter, and nothing has been transmitted.
 7. **CAD tuning:** detPeak and detMin against false alarms, and the real
-   retune-plus-CAD time per profile.
+   retune-plus-CAD time per profile. **Blocked, not open.** Both are still at
+   RadioLib's defaults, and a CAD threshold is set against the noise floor,
+   which SURVEY currently reports as a constant −128 dBm: see the defect in
+   [What the bench showed](#what-the-bench-showed). Fix that first.
 8. **Spectral scan:** does the patch take on this chip, and how fast does it
-   sweep?
+   sweep? **Half answered, and it is the cheap half.** The RSSI sweep works:
+   `LORA SWEEP` walks 863–870 MHz and reported a floor around −100 dBm with
+   three raised spots, −63 dBm at 869.5–869.7, −85 at 866.8–867.0 and −84 at
+   863.9–864.1. The spectral-scan patch (`SX126x_patch_scan.h`) is a different
+   thing and has not been uploaded, so whether it takes on this chip is
+   **still open**.
 9. **Power:** how far does the 3.3 V rail droop at +22 dBm (about 120 mA)
-   with the panel running?
+   with the panel running? **Open, and not yet answerable:** nothing
+   transmits. [Section 7](#7-transmitting) is still a plan.
 10. **The interrupt on GPIO 20:** what is its latency, and does it lose packets
-    while the RGB panel refreshes?
+    while the RGB panel refreshes? **Open.** Frames arrive and the counters
+    move, so the interrupt works; how much it misses under a refresh has not
+    been measured.
 11. **The build:** does RadioLib 7.7.1 build and run on arduino-esp32 2.0.14?
+    **Answered: yes**, both.
 
 ---
 

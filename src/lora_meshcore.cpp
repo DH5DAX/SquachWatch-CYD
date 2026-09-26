@@ -6,6 +6,7 @@
 #include "lora_crypto.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>   // strcasecmp: a tag typed by a person
 
 namespace MeshCore {
 
@@ -114,18 +115,34 @@ uint8_t channelHash(const uint8_t key[16]) {
 
 static const uint8_t PUBLIC_KEY[16] = {
     0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a, 0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72 };
-static const uint8_t MAX_USER = 8;
+// Room for a region's worth of open hashtag channels. A MeshCore Channel is
+// 24 bytes of name, 16 of key and one of hash, so 24 of them cost about a
+// kilobyte of the 7.6 MB free - the old 8 was not a memory budget, it was a
+// guess, and one Ruhr-area operator's own list of open channels already needed
+// eleven.
+static const uint8_t MAX_USER = 24;
 static Channel s_user[MAX_USER];
 static uint8_t s_nUser = 0;
+// Index-for-index with channel(): slot 0 is Public, the rest the user's. A
+// parallel array rather than two fields in Channel, because channel(0)
+// rebuilds Public from the constant above on every call and a counter living
+// in that struct would be reset by its own getter.
+static uint32_t s_frames[1 + MAX_USER];
+static uint32_t s_lastMs[1 + MAX_USER];
 
 uint8_t channelCount() { return (uint8_t)(1 + s_nUser); }
+uint8_t userChannelCount() { return s_nUser; }
+uint8_t maxUserChannels() { return MAX_USER; }
 
 const Channel& channel(uint8_t i) {
     static Channel pub;
     if (i == 0) {
-        strncpy(pub.name, "Public", sizeof pub.name);
+        memset(&pub, 0, sizeof pub);
+        strncpy(pub.name, "Public", sizeof pub.name - 1);
         memcpy(pub.key, PUBLIC_KEY, 16);
         pub.hash = 0x11;
+        pub.derived = false;      // a published constant, not a derivation
+        pub.enabled = true;       // built in, and never switched off
         return pub;
     }
     i--;
@@ -134,6 +151,7 @@ const Channel& channel(uint8_t i) {
 
 bool addChannel(const char* name, const char* keyText) {
     if (s_nUser >= MAX_USER || !name || !*name) return false;
+    if (findChannel(name) >= 0) return false;     // already held; a second slot would be waste
     Channel& c = s_user[s_nUser];
     memset(&c, 0, sizeof c);
     strncpy(c.name, name, sizeof c.name - 1);
@@ -143,6 +161,7 @@ bool addChannel(const char* name, const char* keyText) {
         if (n != 16) n = fromHex(keyText, k, sizeof k);
         if (n != 16) return false;
         memcpy(c.key, k, 16);
+        c.derived = false;
     } else {
         // A hashtag channel: "#name" is the key. Add the hash if it was left off.
         char tag[26];
@@ -150,13 +169,54 @@ bool addChannel(const char* name, const char* keyText) {
         else snprintf(tag, sizeof tag, "#%s", name);
         tag[sizeof tag - 1] = '\0';
         hashtagKey(tag, c.key);
+        c.derived = true;
     }
     c.hash = channelHash(c.key);
+    c.enabled = true;
+    s_frames[1 + s_nUser] = 0;
+    s_lastMs[1 + s_nUser] = 0;
     s_nUser++;
     return true;
 }
 
-void clearUserChannels() { s_nUser = 0; }
+void clearUserChannels() {
+    s_nUser = 0;
+    memset(s_frames + 1, 0, sizeof s_frames - sizeof s_frames[0]);
+    memset(s_lastMs + 1, 0, sizeof s_lastMs - sizeof s_lastMs[0]);
+}
+
+int findChannel(const char* name) {
+    if (!name || !*name) return -1;
+    for (uint8_t i = 0; i < channelCount(); i++)
+        if (strcasecmp(channel(i).name, name) == 0) return (int)i;
+    return -1;
+}
+
+bool removeChannel(uint8_t i) {
+    if (i == 0 || i >= channelCount()) return false;
+    const uint8_t u = (uint8_t)(i - 1);
+    // Order is what the screen and the console print, so the tail shifts down
+    // rather than the last entry backfilling the hole.
+    for (uint8_t k = u; k + 1 < s_nUser; k++) s_user[k] = s_user[k + 1];
+    for (uint8_t k = i; k + 1 < channelCount(); k++) { s_frames[k] = s_frames[k + 1]; s_lastMs[k] = s_lastMs[k + 1]; }
+    s_nUser--;
+    s_frames[1 + s_nUser] = 0;
+    s_lastMs[1 + s_nUser] = 0;
+    return true;
+}
+
+void setChannelEnabled(uint8_t i, bool on) {
+    if (i == 0 || i >= channelCount()) return;
+    s_user[i - 1].enabled = on;
+}
+
+void noteChannelHeard(uint8_t i, uint32_t nowMs) {
+    if (i >= channelCount()) return;
+    s_frames[i]++;
+    s_lastMs[i] = nowMs;
+}
+uint32_t channelFrames(uint8_t i) { return i < channelCount() ? s_frames[i] : 0; }
+uint32_t channelLastMs(uint8_t i) { return i < channelCount() ? s_lastMs[i] : 0; }
 
 bool openSealed(const uint8_t key[16], const uint8_t* mac2, const uint8_t* cipher, uint8_t cipherLen,
                 uint8_t* plain, uint8_t& plainLen) {
@@ -230,13 +290,21 @@ bool decode(const Lora::Packet& pk, Decoded& out) {
             const uint8_t hash = f.payload[0];
             for (uint8_t i = 0; i < channelCount(); i++) {
                 const Channel c = channel(i);
-                if (c.hash != hash) continue;
+                if (!c.enabled || c.hash != hash) continue;
                 uint8_t plen = 0;
                 if (!openSealed(c.key, f.payload + 1, f.payload + 3, (uint8_t)(f.payloadLen - 3), out.plain, plen)) continue;
-                if (f.type == TYPE_GRP_TXT && parseGroupText(out.plain, plen, out.grp)) {
+                // The seal opened, so this key is the right one - and that is
+                // the fact the CHANS view reports, whatever the payload turned
+                // out to be. Only GRP_TXT parses into a sender and a line of
+                // text; a GRP_DATA carries something binary and there is
+                // nothing to show. Setting channelIdx only in the text branch
+                // made a channel that carries data read "never heard" for ever
+                // while opening every one of its frames, which is precisely
+                // the false signal that view exists to prevent.
+                out.channelIdx = i;
+                out.haveChannel = true;
+                if (f.type == TYPE_GRP_TXT && parseGroupText(out.plain, plen, out.grp))
                     out.haveGroup = true;
-                    out.channelIdx = i;
-                }
                 break;
             }
             break;
