@@ -13,6 +13,19 @@
 // the same condition SETTINGS' own LoRa rows are under (ui_settings.cpp).
 #include "lora_sniffer.h"
 #endif
+
+// HOW FAR THE TITLE BAR'S MIDDLE IS OCCUPIED FROM THE LEFT, so that Squachy's
+// speech bubble can decline to rise into it. Handed to Squachy::tick(), which is
+// called long before the pill is drawn -- see loraPillBox() for why the answer
+// does not depend on the frame it is asked in, and drawLoraPill() for the bug
+// this exists to undo.
+#if defined(CROWPANEL7)
+static int loraPillKeep(TFT_eSPI& t);       // defined with the pill it measures
+#else
+// No pill on this board: the only permanent things in that band are the corner
+// icons, which risenBubbleTop() in src/squachy.cpp knows about itself.
+static int loraPillKeep(TFT_eSPI&) { return 0; }
+#endif
 #if SQUACH_MESH
 #include "squachmesh.h"
 #include "meshtutor.h"
@@ -1751,7 +1764,6 @@ static void drawWatchPill(TFT_eSPI& t, int screenW, bool watching, bool hunting,
     const char* txt = hunting ? "HUNT" : "WATCH";
     const uint16_t accent = hunting ? Theme::AMBER : Theme::CYAN;
     t.setTextSize(1);
-    // 16 in a 20px bar: two rows of clearance top and bottom.
     const int bh = 16;
     const int bw = 16 + t.textWidth(txt) + 7;
     // The right limit is the rotate icon (28) plus the lock (26) -- reserve
@@ -1760,7 +1772,12 @@ static void drawWatchPill(TFT_eSPI& t, int screenW, bool watching, bool hunting,
     if (spanR < 0) spanR = screenW - 54;
     int x = spanL + ((spanR - spanL) - bw) / 2;
     if (x < spanL) x = spanL;
-    const int y = (20 - bh) / 2;
+    // Row 0, not centred in the icon box's 20 rows: row 16 down belongs to the
+    // mascot on CLEAR, and a 16-tall pill at row 2 was taking two of them off
+    // the top of his speech bubble. See loraPillBox() in the CROWPANEL7 block
+    // below, which moved for the same reason and which this one stays level
+    // with. The touch target is unchanged -- it already started at row 0.
+    const int y = 0;
     t.fillRoundRect(x, y, bw, bh, 4, Theme::BG);
     t.drawRoundRect(x, y, bw, bh, 4, accent);
     // An eye: open for a passive watch, with a line through it for a hunt.
@@ -2113,7 +2130,8 @@ void uiClearDrawCrowd(TFT_eSPI& t, uint32_t now, const Mesh::SquadMember* crowd,
         if (pct > 100) pct = 100;
         lastPct = pct;
         Squachy::setCompany(true);
-        Squachy::tick(t, cx, bandTop, band, now, advance, 0.3f, false, 0, (uint8_t)pct);
+        Squachy::tick(t, cx, bandTop, band, now, advance, 0.3f, false, 0, (uint8_t)pct,
+                      loraPillKeep(t));
         Squachy::setCompany(false);
     }
 }
@@ -2615,7 +2633,7 @@ static void drawVisit(TFT_eSPI& t, uint32_t now, const SquachMesh::Peer* guest,
     Squachy::setCompany(true);
     Squachy::tick(t, w / 2 - gap + hostLeanPx(), titleBottom,
                   squachyBottom - titleBottom,
-                  now, advance, 1.0f, false, 0, SMALL_PCT);
+                  now, advance, 1.0f, false, 0, SMALL_PCT, loraPillKeep(t));
     Squachy::setCompany(false);
 
     // The visitor is drawn, not ticked: tick() owns mood, quip timers
@@ -2768,8 +2786,81 @@ bool uiMascotStep(uint32_t now, bool advance) {
 // s_nodes[96]), so two digits is the entire range, whereas a frame total
 // climbs without bound and would shove the watch pill sideways every time it
 // gained a digit.
+//
+// WHAT IT COVERED, AND WHAT THE BAND ACTUALLY IS. The owner at the bench:
+// "ausserdem ueberdeckt der lora button im hauptfenster die lustigen sprueche
+// des maskottchens". He is right, and the cause is not the band renderer -- this
+// board draws the whole screen in one pass (DrawBand::has() compiles to `true`
+// off CYD35), so the order in uiClearTick() is the order on the glass:
+// background, Squachy AND HIS BUBBLE, the title bar, then this pill. The title
+// bar paints only the corner icons -- src/theme.cpp's drawTitleBar is
+// `(void)title;` and touches nothing in the middle -- so the pill was the ONLY
+// thing painting over the middle of that band, and it paints Theme::BG first.
+//
+// A one-line bubble rises to row 1 when it clears the corner icons
+// (risenBubbleTop in src/squachy.cpp), is 22 rows tall, and is centred on the
+// screen's mid-line whatever Squachy is doing (drawBubble is handed cx, not his
+// body's x). At 400 logical pixels wide that puts its left edge at 200 - bw/2,
+// so any line wide enough to reach x=124 crossed a pill sitting at x=59..123 in
+// rows 2..17. MEASURED over every line he can say -- all 69 pools in
+// squachy.cpp, 399 lines, against TFT_eSPI font 2's own width table: 366 rise,
+// and 246 of them (62 % of everything he says) had a 65x16 hole punched in the
+// middle of the text.
+//
+// THE FIX, AND THE TWO OPTIONS IT BEAT. The pill gives up the two rows it was
+// borrowing from him (y = 0 rather than 2, so rows 0..15 -- the band above the
+// row uiClearTick hands the mascot is exactly 16 tall), and the bubble declines
+// to RISE across it (loraPillKeep, handed to Squachy::tick). Nothing is hidden,
+// nothing moves, the touch target is unchanged, and the text is never covered.
+// The cost is measured too: 252 of those lines now sit 15 px lower, at the top
+// of his own band, which is where every wrapped bubble and every bubble near the
+// corners already sits.
+//   - "Shrink to the icon while a bubble is up" does not work, and the same
+//     arithmetic is why: an icon-only pill still ends at x=82, and every line
+//     from 221 to 340 px wide reaches past it. It also makes the door's target
+//     change size under the thumb, and a tap aimed at the count would miss.
+//   - "Let the bubble clip it" -- drawing the pill before Squachy -- hides it
+//     completely instead of partly: tick() erases the previous frame's bubble
+//     rectangle every frame a bubble is up (src/squachy.cpp, ownX/ownY), which
+//     is rows 1..23 right across this band, so the pill would be erased and not
+//     redrawn for as long as he is talking, while still being tappable. An
+//     invisible live control is a worse bug than the one being fixed.
 static bool    s_loraPillOn = false;
 static int16_t s_lpX = 0, s_lpY = 0, s_lpW = 0, s_lpH = 0;
+
+// Where the pill goes, with NOTHING IN IT THAT DEPENDS ON THIS FRAME: the width
+// is measured off the widest string it can ever print (see the header comment
+// above) and the x is walked past the gear's hit rect, so it is the same box
+// every frame. That is what lets loraPillKeep() hand the mascot the pill's right
+// edge at the top of the frame, hundreds of lines before the pill is drawn.
+static void loraPillBox(TFT_eSPI& t, int screenW, int& x, int& y, int& bw, int& bh) {
+    // The font as well as the size, and not because the pill is drawn in a
+    // strange one: the width below is a MEASUREMENT, and loraPillKeep() takes it
+    // at the top of the frame where the ambient font is whatever the last thing
+    // drawn left behind. Font 2 is 8 px to the character against font 1's 6, so
+    // an unstated font would make the box -- and the rows reserved from the
+    // mascot's bubble -- depend on the drawing order of an unrelated screen.
+    t.setTextFont(1);
+    t.setTextSize(1);
+    bh = 16;
+    bw = 16 + t.textWidth("LORA 00") + 7;
+    // Past the gear's TOUCH TARGET, not past the gear's picture. The icon is
+    // 28px wide, but Theme::settingsButtonHit() answers a 55x50 rect and
+    // main.cpp tests that before this screen sees the tap at all -- a pill at
+    // the free span's old left edge of 32 would have had a third of itself
+    // swallowed by SETTINGS. Walked rather than copied, so a later change to
+    // that rect cannot quietly eat the door. (y = 0 is inside it at any x.)
+    x = 32;
+    while (x < screenW / 3 && Theme::settingsButtonHit(x, 0)) x++;
+    x += 4;                            // a little air between the two targets
+    // Row 0, not row 2. A 16-tall pill centred in the icon box's 20 rows ended
+    // at row 17, and uiClearTick hands the mascot everything from row 16 down --
+    // so those last two rows were his, and a bubble sitting at the top of his
+    // band lost its rim to them. The chrome in this band now fits inside the 16
+    // rows that are the chrome's. The watch pill moved with it, both to stay
+    // level with this one and because the same two rows were its to give back.
+    y = 0;
+}
 
 // Draws it and returns the x the WATCH pill's free span now starts at.
 static int drawLoraPill(TFT_eSPI& t, int screenW) {
@@ -2787,23 +2878,8 @@ static int drawLoraPill(TFT_eSPI& t, int screenW) {
     if (present) snprintf(txt, sizeof txt, "LORA %2u", (unsigned)Lora::nodeCount());
     else         snprintf(txt, sizeof txt, "LORA --");
 
-    t.setTextSize(1);
-    const int bh = 16;                 // 16 in a 20px bar, like the watch pill
-    // Measured off the widest string it can ever print rather than off this
-    // frame's, for the reason in the header comment above.
-    const int bw = 16 + t.textWidth("LORA 00") + 7;
-
-    // Past the gear's TOUCH TARGET, not past the gear's picture. The icon is
-    // 28px wide, but Theme::settingsButtonHit() answers a 55x50 rect and
-    // main.cpp tests that before this screen sees the tap at all -- a pill at
-    // the free span's old left edge of 32 would have had a third of itself
-    // swallowed by SETTINGS. Walked rather than copied, so a later change to
-    // that rect cannot quietly eat the door. (y = 0 is inside it at any x.)
-    int x = 32;
-    while (x < screenW / 3 && Theme::settingsButtonHit(x, 0)) x++;
-    x += 4;                            // a little air between the two targets
-
-    const int y = (20 - bh) / 2;
+    int x, y, bw, bh;
+    loraPillBox(t, screenW, x, y, bw, bh);
     t.fillRoundRect(x, y, bw, bh, 4, Theme::BG);
     t.drawRoundRect(x, y, bw, bh, 4, accent);
     // An antenna, the way the watch pill has an eye: one glyph that says which
@@ -2834,6 +2910,25 @@ static int drawLoraPill(TFT_eSPI& t, int screenW) {
 bool uiClearLoraPillHit(int x, int y) {
     return s_loraPillOn &&
            x >= s_lpX && x < s_lpX + s_lpW && y >= s_lpY && y < s_lpY + s_lpH;
+}
+
+// Declared at the top of this file: how far the band is occupied from the left,
+// for the bubble that must not rise across it.
+//
+// The pill's own right edge plus one pixel of air, which is the shape of the
+// number risenBubbleTop() already keeps for the corner icons (CORNER_W = icon
+// box plus a pixel). The DRAWN box, not the touch rect: the touch rect is 4 px
+// wider on each side and 14 taller, deliberately overlapping rows the bubble is
+// welcome to use -- what must not be painted over is the pill's ink.
+//
+// Only the permanent fixture is reserved. The WATCH pill sits further right and
+// is drawn only while a target is set; reserving it too would switch the rise off
+// for the length of a watch, which is a poor trade for an overlay that is not
+// always there. A risen bubble can still cross it, exactly as it always could.
+static int loraPillKeep(TFT_eSPI& t) {
+    int x, y, bw, bh;
+    loraPillBox(t, t.width(), x, y, bw, bh);
+    return x + bw + 1;
 }
 #endif
 
@@ -3057,8 +3152,11 @@ void uiClearTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adv
             drawVisit(t, now, guest, titleBottom, squachyBottom, step, msgFresh);
         } else
 #endif
+        // The last argument is the LORA pill's right edge: his one-line bubble
+        // rises into the title bar's middle, and that is what is standing there.
+        // See loraPillKeep() and drawLoraPill()'s header comment.
         Squachy::tick(t, w / 2, titleBottom, squachyBottom - titleBottom, now, step,
-                      1.0f, false, -1, Settings::squachySizePct());
+                      1.0f, false, -1, Settings::squachySizePct(), loraPillKeep(t));
 #if SQUACH_MESH
         // Everybody in range, whether or not one of them is on screen.
         {

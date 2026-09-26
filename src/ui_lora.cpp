@@ -44,6 +44,11 @@ bool        s_msgAll  = false;   // every channel at once, newest first
 // SURVEYCMP: which two runs. -1 until a pair is chosen or defaulted.
 int8_t   s_cmpA = -1, s_cmpB = -1;
 
+// SURVEYCMP: which run the delete panel is asking about, or -1 while it is down.
+// The panel is modal (see uiLoraTap) and is raised by a HOLD on a run in the
+// strip, never by a tap: these views are driven with a thumb while walking.
+int8_t   s_delRun = -1;
+
 // ---- geometry --------------------------------------------------------------
 
 const int BODY_TOP = 16;
@@ -177,16 +182,39 @@ const char* viewTitle(LoraView v) {
     }
 }
 
+// WHAT EACH SLOT MEANS, AND THE ONE RULE THAT WAS BROKEN.
+//
+// Slot 0 is BACK and slot 1 is the picker, IN EVERY VIEW, with no exception.
+// Slot 2 is the one thing the view showing is for, and its label always names
+// it. That is what this screen's header comment has claimed all along -- and
+// slot 1 did not obey it: in PACKET it was "[ < ]" and stepped to the newer
+// frame, because uiLoraTap tested for PACKET before it tested for slot 1. So
+// the second button was the views button in nine views and something else in
+// the tenth, which is the whole of the complaint: "reagiert seltsam und fuehrt
+// nicht immer direkt zu den views".
+//
+// WHAT PACKET LOSES BY THAT, SAID PLAINLY. It had two buttons for stepping
+// frames and now has one, so the "newer" direction is gone: slot 2 walks
+// towards OLDER frames only. The way back to a newer frame is BACK to the list
+// -- which is newest-first, with the frame you were on still in it -- and a tap
+// on the row you want. One extra tap, on a list that is already the way you got
+// here. The alternatives were worse: a second gesture nobody would find, or a
+// wrap from the oldest frame to the newest, which is the same kind of surprise
+// this change exists to remove. At the oldest frame the button says so in a
+// toast rather than doing nothing (uiLoraTap).
 void barLabels(const char* l[3]) {
     l[0] = "[ BACK ]";
     l[1] = "[ VIEWS ]";
     l[2] = "[ SURVEY ]";
     switch (s_view) {
-        // The frame view keeps its own pair: < is towards the newer frame, > the
-        // older, in the list's order.
-        case LoraView::PACKET:    l[1] = "[ < ]"; l[2] = "[ > ]"; break;
+        // Nine characters at size 2 is 108 px in a 128 px box -- it reads at the
+        // bar's full size, which "[ OLDER FRAME ]" would not (see bar()).
+        case LoraView::PACKET:    l[2] = "[ OLDER ]"; break;
         // From the survey, the third button is the thing the survey is for.
         case LoraView::SURVEY:    l[2] = "[ CMP ]"; break;
+        // The picker IS the views, and there is nothing under it to survey that
+        // a cell of it does not already reach. Both are drawn as empty space
+        // rather than as buttons, and uiLoraTap declines a tap on either.
         case LoraView::PICK:      l[1] = nullptr; l[2] = nullptr; break;
         default: break;
     }
@@ -1257,7 +1285,12 @@ void drawSurvey(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
                  Lora::modeName(Lora::mode()));
         col = Theme::AMBER;
     } else if (const uint8_t runs = Lora::surveyRunCount()) {
-        snprintf(line, sizeof line, "%u run%s held. CMP is the measurement; LORA SURVEY LABEL names one",
+        // The hold is where a gesture goes to be discovered: nothing on the glass
+        // can advertise it, the way a button advertises itself, so the one line
+        // this view already spends on the runs says it. 62 characters at four
+        // runs, which is inside the 65 this panel's width holds (see the other
+        // lines in this view).
+        snprintf(line, sizeof line, "%u run%s held. CMP is the measurement; hold one there to drop it",
                  (unsigned)runs, runs == 1 ? "" : "s");
     } else {
         snprintf(line, sizeof line, "START, walk, STOP, swap the antenna, START again -- then CMP");
@@ -1422,6 +1455,11 @@ void drawSurveyCmp(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         t.print("SURVEY: START, walk, STOP. Swap the antenna. START, walk, STOP.");
         t.setCursor(8, y + 4 + 6 * lh);
         t.print("Then tap two runs above -- the last one tapped is B.");
+        // Both of the things a finger cannot guess: the hold that drops a run,
+        // and the console line that names one. This is the only view where there
+        // is room to say them.
+        t.setCursor(8, y + 4 + 7 * lh);
+        t.print("HOLD a run to drop it. LORA SURVEY LABEL names one.");
         return;
     }
 
@@ -1511,6 +1549,124 @@ void drawSurveyCmp(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         t.setCursor(8, y + 2);
         t.print("no node appears in both runs");
     }
+}
+
+// ---- dropping a run, and resetting the survey ------------------------------
+//
+// WHY THIS EXISTS. A survey holds four run slots and the fifth start reuses the
+// oldest FINISHED one (include/lora_survey.h's start()). Until now nothing on
+// the glass could empty a slot and the only console command was LORA SURVEY
+// CLEAR, which takes everything -- so a run started by mistake, which happened
+// twice on the bench on 2026-09-26, sat in the list with two frames in it and
+// confused every comparison drawn afterwards. There was no way to get the slot
+// back short of throwing away the runs that were worth keeping.
+//
+// WHY A HOLD AND A PANEL, AND NOT A BUTTON. A tap is wrong here: this view is
+// read at arm's length and driven with a thumb while the other hand holds an
+// antenna, and the run boxes in the strip are also the control that CHOOSES the
+// pair -- so the same 94x30 box a walking thumb aims at to pick B cannot also
+// be the one that destroys it. The firmware already has an idiom for exactly
+// this: the raw-scan screen long-presses a result row (500 ms, 12 px of
+// tolerance) and puts up a modal panel whose buttons commit -- src/main.cpp's
+// RAWSCAN case and ui_rawscan.cpp's drawConfirmPanel(). This follows it, with
+// the same threshold and the same "the touch that opened the panel cannot also
+// press it" rule, so there is one gesture on the device for "I mean this", not
+// two.
+//
+// THE BUTTON ORDER IS BY FREQUENCY AND BY HARM. A thumb comes up from the
+// bottom of the panel, so the bottom button is the one that gets pressed most
+// and should cost least if it is pressed by accident: DELETE THIS RUN, which
+// loses one run. CANCEL sits in the middle, where a miss in either direction
+// lands on it. RESET is furthest away at the top, because it takes all four
+// runs and the live trend, and nobody does it twice a session.
+static const int DEL_BTN_H = 26;
+
+void delPanelBox(int screenW, int screenH, int& px, int& py, int& pw, int& ph) {
+    pw = screenW - 40;
+    if (pw > 300) pw = 300;
+    // Two text rows, three buttons, the gaps between them, and a margin.
+    ph = 8 + 2 * 11 + 3 * DEL_BTN_H + 2 * 8 + 10;
+    px = (screenW - pw) / 2;
+    py = (screenH - ph) / 2;
+    if (py < BODY_TOP) py = BODY_TOP;
+}
+
+// 0 = RESET (top), 1 = CANCEL, 2 = DELETE (bottom). See the order's reasoning
+// above; the drawing and the hit test both come through here so the two cannot
+// drift, which is the rule ui_rawscan.cpp's confirmRects() was written for.
+void delBtnBox(int screenW, int screenH, uint8_t i, int& bx, int& by, int& bw, int& bh) {
+    int px, py, pw, ph;
+    delPanelBox(screenW, screenH, px, py, pw, ph);
+    const int margin = 10, gap = 8;
+    bw = pw - 2 * margin;
+    bh = DEL_BTN_H;
+    bx = px + margin;
+    by = py + ph - margin - (3 - (int)i) * bh - (2 - (int)i) * gap;
+}
+
+void drawDelPanel(TFT_eSPI& t, int w, int h, uint32_t now) {
+    if (s_delRun < 0) return;
+    Lora::Survey::Run r;
+    if (!Lora::surveyRun((uint8_t)s_delRun, r)) { s_delRun = -1; return; }
+    int px, py, pw, ph;
+    delPanelBox(w, h, px, py, pw, ph);
+    t.fillRoundRect(px, py, pw, ph, 6, Theme::BG);
+    t.drawRoundRect(px, py, pw, ph, 6, Theme::RED);
+    t.setTextSize(1);
+    t.setTextWrap(false);
+    const bool rec = Lora::surveyRecording() == s_delRun;
+    char line[64];
+    // DELETE on the glass and DROP on the console, each matching the words
+    // around it: the button under this asks in the owner's own word ("loeschen"),
+    // and LORA SURVEY DROP matches LORA CHAN DROP, which is the console file's
+    // idiom for taking one row out of a list.
+    snprintf(line, sizeof line, "DELETE RUN %u?", (unsigned)(s_delRun + 1));
+    t.setTextColor(Theme::RED, Theme::BG);
+    t.setCursor(px + 10, py + 8);
+    t.print(line);
+    // What is about to go, in the same figures the strip and the console print,
+    // so that the panel is enough to decide on: the label, the evidence, and --
+    // the one that changes the answer -- whether this is the run RECORDING.
+    char span[14]; spanText((r.stopMs ? r.stopMs : now) - r.startMs, span, sizeof span);
+    snprintf(line, sizeof line, "\"%.12s\"  %luf %un %s%s", r.label, (unsigned long)r.frames,
+             (unsigned)r.nodes, span, rec ? "  RECORDING" : "");
+    // Cut to the panel rather than to the screen. Wrap is off here, so a long
+    // line would print straight through the border and out the other side --
+    // which on a 240 px panel, where the box is 200 wide and this line can reach
+    // 32 characters, it does. Six pixels a glyph at size 1, the same arithmetic
+    // the frame view and the comparison use for their own wrapping.
+    {
+        const int cols = (pw - 20) / 6;
+        if (cols > 0 && (int)strlen(line) > cols) line[cols] = '\0';
+    }
+    t.setTextColor(rec ? Theme::AMBER : Theme::WHITE, Theme::BG);
+    t.setCursor(px + 10, py + 8 + 11);
+    t.print(line);
+    int bx, by, bw, bh;
+    char lab[24];
+    delBtnBox(w, h, 0, bx, by, bw, bh);
+    // The count, because "all" on its own does not say how much is about to go,
+    // and this is the button that also takes the live trend with it.
+    const uint8_t held = Lora::surveyRunCount();
+    snprintf(lab, sizeof lab, "RESET ALL %u RUN%s", (unsigned)held, held == 1 ? "" : "S");
+    Theme::drawButton(t, bx, by, bw, bh, lab, false);
+    delBtnBox(w, h, 1, bx, by, bw, bh);
+    Theme::drawButton(t, bx, by, bw, bh, "CANCEL", false);
+    delBtnBox(w, h, 2, bx, by, bw, bh);
+    snprintf(lab, sizeof lab, "DELETE RUN %u", (unsigned)(s_delRun + 1));
+    Theme::drawButton(t, bx, by, bw, bh, lab, false);
+}
+
+// Forget a run the pair was pointing at. A pair that did not include it is left
+// exactly as the owner set it; a pair that did loses that side, and the next
+// redraw finds a half-chosen pair and calls cmpDefault(), which re-picks BOTH
+// from the newest two finished runs. That is deliberate rather than clever:
+// keeping the surviving side and hunting for a new partner would silently
+// compare the owner's antenna against a run they did not choose.
+void delForgetPair(int8_t run) {
+    if (s_cmpA == run) s_cmpA = -1;
+    if (s_cmpB == run) s_cmpB = -1;
+    s_scroll[(int)LoraView::SURVEYCMP] = 0;
 }
 
 // ---- PICK: the grid that reaches everything --------------------------------
@@ -1770,6 +1926,9 @@ void uiLoraInit(TFT_eSPI& t, LoraView v) {
     s_under = s_view;
     s_adverts = false;
     s_msgAll  = false;
+    // A panel is a question about right now. Leaving the screen with one up and
+    // coming back to it later would be answering a question nobody remembers.
+    s_delRun  = -1;
     advForget();
     liveForget();
     // The traffic history starts over with the screen, because a monitor that
@@ -1780,6 +1939,10 @@ void uiLoraInit(TFT_eSPI& t, LoraView v) {
 LoraView uiLoraView() { return s_view; }
 
 void uiLoraScroll(int delta) {
+    // Nothing underneath a modal panel moves, scrolling included: the list the
+    // panel is asking about must still be the list it was asking about when the
+    // answer comes.
+    if (s_delRun >= 0) return;
     int& s = s_scroll[(int)s_view];
     s += delta;
     if (s < 0) s = 0;
@@ -1838,13 +2001,73 @@ void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adva
         default:                  drawStats(t, now, w, top, bottom); break;
     }
     drawBar(t, w, h);
+    // Over everything this frame drew, the bar included: it is modal, and a
+    // panel with live buttons showing underneath it invites a tap on one of
+    // them. ui_rawscan.cpp draws its confirm panel last for the same reason.
+    drawDelPanel(t, w, h, now);
     Theme::drawToast(t, now);
+}
+
+bool uiLoraHold(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
+    if (s_delRun >= 0) return false;              // already up: nothing to raise
+    if (s_view != LoraView::SURVEYCMP) return false;
+    const int top = statusBottom(t);
+    for (uint8_t i = 0; i < Lora::Survey::RUNS; i++) {
+        int bx, by, bw, bh;
+        cmpStripBox(screenW, top, i, bx, by, bw, bh);
+        if (x < bx || x > bx + bw || y < by || y > by + bh) continue;
+        Lora::Survey::Run r;
+        // An empty slot has nothing to drop, and the panel must not offer RESET
+        // from a box that means nothing: the hold is declined and the release
+        // becomes the ordinary tap, which says EMPTY SLOT.
+        if (!Lora::surveyRun(i, r)) return false;
+        s_delRun = (int8_t)i;
+        return true;
+    }
+    return false;
 }
 
 LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
     const Bar b = bar(screenW, screenH);
     const int bottom = bodyBottom(screenW, screenH);
     t.setTextSize(1);
+
+    // ---- the drop/reset panel, which owns every tap while it is up
+    //
+    // Modal in the strong sense: a tap that misses all three buttons is
+    // swallowed rather than falling through to the strip or the bar underneath.
+    // The alternative -- dismiss on a tap outside -- puts "throw the panel away"
+    // on the biggest target on the screen, next to a button that deletes a run.
+    if (s_delRun >= 0) {
+        const int8_t run = s_delRun;
+        for (uint8_t i = 0; i < 3; i++) {
+            int bx, by, bw, bh;
+            delBtnBox(screenW, screenH, i, bx, by, bw, bh);
+            if (x < bx || x > bx + bw || y < by || y > by + bh) continue;
+            if (i == 1) { s_delRun = -1; return LoraTap::HANDLED; }   // CANCEL
+            s_delRun = -1;
+            if (i == 2) {
+                const bool rec = Lora::surveyRecording() == run;
+                if (Lora::surveyDropRun((uint8_t)run)) {
+                    delForgetPair(run);
+                    // Every head and sub on this screen is inside Theme's toast
+                    // buffers -- 17 characters and 21, cut with no ellipsis past
+                    // that (src/theme.cpp's s_toastHead/s_toastSub).
+                    Theme::showToast(rec ? "RUN ABORTED" : "RUN DELETED",
+                                     "run numbers unchanged", Theme::CYAN);
+                } else {
+                    Theme::showToast("STILL THERE", "the store was busy", Theme::AMBER);
+                }
+            } else {
+                Lora::surveyClear();
+                s_cmpA = s_cmpB = -1;
+                s_scroll[(int)LoraView::SURVEYCMP] = 0;
+                Theme::showToast("SURVEY RESET", "runs and trend gone", Theme::CYAN);
+            }
+            return LoraTap::HANDLED;
+        }
+        return LoraTap::HANDLED;
+    }
 
     // ---- the bar
     if (y >= b.y && y <= b.y + b.h) {
@@ -1865,16 +2088,31 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
             }
             return LoraTap::BACK;
         }
+        // SLOT 1 IS THE PICKER, FIRST AND WITHOUT EXCEPTION. This test used to
+        // sit BELOW the PACKET branch, which is what made the views button mean
+        // "newer frame" in one view out of ten. Nothing view-specific may be
+        // tested above this line -- see barLabels() for the rule and for what
+        // PACKET gave up to keep it.
+        if (which == 1) { s_under = s_view; s_view = LoraView::PICK; return LoraTap::HANDLED; }
+        // ---- slot 2: the one thing THIS view is for
         if (s_view == LoraView::PACKET) {
-            // < is towards the newer frame, > the older, in the list's order.
+            // Towards the older frame, in the list's order, and only that way.
             const uint32_t total = Lora::packetTotal();
             uint32_t idx = s_open + (total - s_openTotal);
-            if (which == 1 && idx > 0) idx--;
-            if (which == 2 && idx + 1 < Lora::packetCount()) idx++;
+            if (idx + 1 >= Lora::packetCount()) {
+                // Nothing older is held. Said out loud, because a button that
+                // does nothing when pressed is the same complaint in a smaller
+                // size. Both strings are inside Theme's toast buffers -- 17
+                // characters for the head and 21 for the sub (src/theme.cpp's
+                // s_toastHead/s_toastSub), and anything longer is cut with no
+                // ellipsis to show it was.
+                Theme::showToast("OLDEST FRAME", "BACK for the list", Theme::AMBER);
+                return LoraTap::HANDLED;
+            }
+            idx++;
             s_open = (uint16_t)idx; s_openTotal = total;
             return LoraTap::HANDLED;
         }
-        if (which == 1) { s_under = s_view; s_view = LoraView::PICK; return LoraTap::HANDLED; }
         if (s_view == LoraView::SURVEY) { s_view = LoraView::SURVEYCMP; return LoraTap::HANDLED; }
         openView(LoraView::SURVEY, false, false);
         return LoraTap::HANDLED;

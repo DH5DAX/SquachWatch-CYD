@@ -323,7 +323,24 @@ bool    label(const char* label);
 uint8_t runCount();                       // slots in use, recording one included
 bool    run(uint8_t i, Run& out);
 void    clear();                          // every run and the live trend
-void    clearRun(uint8_t i);
+// Drop ONE run. False when that slot held nothing, or is past the end -- which
+// is what lets a console command say "no run 3" rather than report success on a
+// number nobody has.
+//
+// The slot is emptied WHERE IT IS and every other run keeps its index, because
+// a run's number IS its slot (see start(), and the "%u" in every console line):
+// renumbering would move run 3 to run 2 under a reader who is halfway through
+// comparing 2 against 4. An empty slot in the middle is the honest picture, and
+// start() takes the first free one, so the slot comes straight back into use.
+//
+// Dropping the run that is RECORDING aborts it: nothing is kept and recording()
+// goes back to -1. That is the case this exists for -- a run started by
+// mistake, which is not a finished run and cannot be stopped into anything
+// worth keeping.
+//
+// The live trend is NOT touched: it is a ring of the last readings per node and
+// belongs to no run. clear() is the one that takes it.
+bool    clearRun(uint8_t i);
 
 // A run's rows, loudest median first, rows under EVIDENCE_MIN last. Paged the
 // way Lora::nodeSnapshot is, and for the same reason: one lock acquisition per

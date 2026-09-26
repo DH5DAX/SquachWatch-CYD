@@ -1353,8 +1353,15 @@ The amateur licence adds nothing there. The limits are:
 
 **Screens** — as built, on the 400×240 logical canvas. Ten views on one
 screen, reached by `[ VIEWS ]` in the button bar, which opens a 3×3 grid with a
-live figure under each name; `[ SURVEY ]` is on the bar of every view because
-it is the one used away from a desk.
+live figure under each name.
+
+The bar's three slots have fixed meanings, and the middle one has no
+exceptions: `[ BACK ]`, `[ VIEWS ]`, and then whatever *this* view is for —
+`[ SURVEY ]` on most of them, because that is the one used away from a desk,
+`[ CMP ]` from the survey, `[ OLDER ]` in the frame view. Slot 1 used to
+relabel itself to `[ < ]` in PACKET and step frames, so the views button was
+the views button in nine views out of ten; the frame view now steps one way
+only, and the way back to a newer frame is `[ BACK ]` to the list and a tap.
 
 | View | Shows |
 |---|---|
@@ -1384,6 +1391,18 @@ whatever happened to transmit measures the traffic and not the connector.
 trades "one more neighbour" against "n dB" and why the trend's scale has a
 10 dB floor. Runs are labelled from the console (`LORA SURVEY LABEL <text>`):
 the panel has no keyboard and says so rather than pretending.
+
+**Getting a slot back.** Four run slots, and the fifth START reuses the oldest
+finished one — so a run started by mistake used to sit in the list until
+`LORA SURVEY CLEAR` threw away the good ones with it. `LORA SURVEY DROP <n>`
+drops one run, and in SURVEYCMP a **hold** on a run in the strip raises a panel
+with DELETE RUN *n* / CANCEL / RESET ALL. A hold rather than a tap because a tap
+there already chooses the run for the comparison, and because these views are
+driven with a thumb while walking — the same gesture the raw-scan screen uses
+before it watches or ignores a device. Dropping a run leaves every other run's
+*number* alone: a run's number is its slot, and renumbering would move run 3 to
+run 2 under somebody halfway through comparing 2 against 4. Dropping the run
+that is recording aborts it.
 
 DEX cards for the protocol types, and alerts only for `LORA_TRACKER`.
 

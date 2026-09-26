@@ -163,6 +163,11 @@ bool     surveyCompare(uint8_t a, uint8_t b, Survey::Compare& out);
 uint8_t  surveyPairs(uint8_t a, uint8_t b, Survey::Pair* out, uint8_t cap, uint8_t from = 0);
 uint8_t  surveyTrend(Proto p, uint64_t id, Survey::Sample* out, uint8_t cap);
 void     surveyClear();
+// One run gone, the rest left exactly where they are -- LORA SURVEY DROP <n> and
+// the SURVEYCMP view's hold-to-delete both come through here. False when that
+// slot held nothing; include/lora_survey.h's clearRun says what it does to the
+// slot table and what it does to a run that is recording.
+bool     surveyDropRun(uint8_t i);
 // The verdict in a word, and the sentence that says what it rests on.
 //
 // Pure functions over the caller's own Compare -- nothing shared, so no lock --
@@ -239,6 +244,7 @@ inline bool surveyCompare(uint8_t, uint8_t, Survey::Compare& o) { o = Survey::Co
 inline uint8_t surveyPairs(uint8_t, uint8_t, Survey::Pair*, uint8_t, uint8_t = 0) { return 0; }
 inline uint8_t surveyTrend(Proto, uint64_t, Survey::Sample*, uint8_t) { return 0; }
 inline void surveyClear() {}
+inline bool surveyDropRun(uint8_t) { return false; }
 inline const char* surveyVerdictText(Survey::Verdict) { return "NO DATA"; }
 inline void surveyVerdictLine(const Survey::Compare&, char* out, size_t cap) { if (cap) out[0] = '\0'; }
 inline uint16_t msgCount() { return 0; }

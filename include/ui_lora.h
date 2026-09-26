@@ -23,6 +23,14 @@
 // survey's START/STOP is a 392-pixel button because it is pressed with a thumb
 // while the other hand holds an antenna.
 //
+// THE MIDDLE BUTTON IS THE PICKER IN EVERY VIEW, and the sentence above was not
+// true of the code until the bar was fixed: PACKET relabelled slot 1 to "[ < ]"
+// and stepped frames with it, so the views button was the views button in nine
+// views and a frame-step in the tenth. Slot 2 is the per-view slot -- it says
+// SURVEY, or CMP in the survey, or OLDER in the frame view -- and its label
+// always names what it does. src/ui_lora.cpp's barLabels() carries the rule and
+// says what PACKET gave up for it.
+//
 // Plain text at size 1 for the dense lists on purpose: this is the maintenance
 // tool and a sysop wants the numbers, not the mascot. The SURVEY view is the
 // deliberate exception and src/ui_lora.cpp says why -- it is read at arm's
@@ -65,6 +73,18 @@ void uiLoraScroll(int delta);                // positive = down
 // wobble during a tap a drag.
 int  uiLoraDragStep(TFT_eSPI& t);
 LoraView uiLoraView();
+
+// A touch that has stayed put past main.cpp's hold threshold, at the position it
+// went down. True when this screen took it, and then the caller must NOT let the
+// release become a tap as well -- the same "the touch that opened the panel
+// cannot also press it" rule the raw-scan screen's confirm panel keeps
+// (src/main.cpp's RAWSCAN case).
+//
+// One gesture uses it today: a hold on a run in the SURVEYCMP strip raises the
+// modal panel that drops that run or resets the whole survey. A tap there still
+// chooses the run for the comparison, which is why deleting cannot be a tap --
+// src/ui_lora.cpp's "dropping a run" block has the reasoning.
+bool uiLoraHold(TFT_eSPI& t, int x, int y, int screenW, int screenH);
 
 enum class LoraTap : uint8_t { NONE, HANDLED, BACK };
 // Handles the bar, the rows and the in-body buttons itself; BACK means leave

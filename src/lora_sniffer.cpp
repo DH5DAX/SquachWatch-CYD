@@ -595,6 +595,16 @@ void surveyClear() {
     Survey::clear();
     xSemaphoreGive(s_lock);
 }
+bool surveyDropRun(uint8_t i) {
+    // Under the lock like every other survey call: the store is written by
+    // Nodes::note() on the radio task, and this one memsets a whole run out from
+    // under it. 200 ms rather than the 20 the read-only pages use, because a
+    // dropped run is a typed or pressed command that must not silently fail.
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    const bool ok = Survey::clearRun(i);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
 
 uint16_t msgCount()   { return Msgs::count(); }
 uint32_t msgDropped() { return Msgs::dropped(); }
@@ -1120,7 +1130,8 @@ static void surveyPrintTrend(const Survey::Sample* s, uint8_t n) {
 }
 
 static void surveyHelp() {
-    Serial.println("[lora] LORA SURVEY START [label] | LABEL <text> | STOP | LIST | SHOW <n> | CMP <a> <b> | LIVE | CLEAR");
+    Serial.println("[lora] LORA SURVEY START [label] | LABEL <text> | STOP | LIST | SHOW <n> | CMP <a> <b> | LIVE");
+    Serial.println("[lora] DROP <n> drops one run and leaves the others' numbers alone; CLEAR drops the lot.");
     Serial.println("[lora] the antenna test. Park the radio first (LORA FOCUS <n>): a hopping radio hears each");
     Serial.println("[lora] network only part of the time, and two runs that hopped differently are not comparable.");
     Serial.println("[lora] one run per antenna or per spot, then CMP: the measurement is the SAME node compared");
@@ -1270,6 +1281,31 @@ static bool surveyConsole(const char* rest) {
             Serial.println("[lora] nothing heard directly yet. Every row the NODES view shows with a v is a");
             Serial.println("[lora] relayed copy: that signal is the last repeater's link to here, not the node's.");
         }
+        return true;
+    }
+    if (strncasecmp(rest, "DROP", 4) == 0) {
+        // One run by its number, the way LORA CHAN DROP takes one channel by its
+        // name: the run numbers are the ones LORA SURVEY LIST prints, which are
+        // the slots, and they do not move when one of them empties (see
+        // Survey::clearRun in include/lora_survey.h).
+        const int n = atoi(rest + 4);
+        Survey::Run r;
+        if (n < 1 || n > (int)Survey::RUNS || !surveyRun((uint8_t)(n - 1), r)) {
+            Serial.printf("[lora] LORA SURVEY DROP <1..%u> -- the run number LORA SURVEY LIST prints\n",
+                          (unsigned)Survey::RUNS);
+            return true;
+        }
+        const bool wasRec = surveyRecording() == (int8_t)(n - 1);
+        if (!surveyDropRun((uint8_t)(n - 1))) {
+            // The slot was there a line ago, so this is the lock and nothing
+            // else: the radio task is mid-frame in the survey store.
+            Serial.println("[lora] the survey store is busy -- try that again");
+            return true;
+        }
+        Serial.printf("[lora] run %u \"%s\" dropped%s. %u of %u slots used; the other runs keep their numbers\n",
+                      (unsigned)n, r.label,
+                      wasRec ? " -- it was RECORDING, and nothing of it is kept" : "",
+                      (unsigned)surveyRunCount(), (unsigned)Survey::RUNS);
         return true;
     }
     if (strcasecmp(rest, "CLEAR") == 0) { surveyClear(); Serial.println("[lora] every run and the live trend gone"); return true; }

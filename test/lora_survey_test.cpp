@@ -471,6 +471,72 @@ int main() {
         ck("the previous one was stopped, not dropped", Survey::run(0, got) && got.stopMs != 0);
     }
 
+    suite("Dropping ONE run: the slot empties where it is and the rest do not move");
+    {
+        Survey::clear();
+        const int16_t r[] = { -90, -89, -88 };
+        for (uint8_t i = 0; i < Survey::RUNS; i++) {
+            char lab[16]; snprintf(lab, sizeof lab, "run%u", (unsigned)i);
+            Survey::start(lab, 3, false, (uint32_t)(1000 + i * 10000));
+            feed((uint64_t)(0x500 + i), "n", r, 3, 20, (uint32_t)(1000 + i * 10000));
+            Survey::stop((uint32_t)(5000 + i * 10000));
+        }
+        ck("four runs held", Survey::runCount() == Survey::RUNS);
+        // The bench case this exists for: run 2 was mis-started, holds two
+        // frames, and sits in the middle of every comparison that follows.
+        ck("dropping run 2 says it was there", Survey::clearRun(1));
+        ck("and it is gone", Survey::runCount() == (uint8_t)(Survey::RUNS - 1));
+        Survey::Run got;
+        ck("the slot reads empty", !Survey::run(1, got));
+        // THE WHOLE POINT: 0, 2 and 3 are still 0, 2 and 3. A reader with "2 vs
+        // 4" written on the back of their hand still has it.
+        ck("slot 0 did not move", Survey::run(0, got) && strcmp(got.label, "run0") == 0);
+        ck("slot 2 did not move", Survey::run(2, got) && strcmp(got.label, "run2") == 0);
+        ck("slot 3 did not move", Survey::run(3, got) && strcmp(got.label, "run3") == 0);
+        Survey::Compare c;
+        ck("and 3 against 4 still compares, by those numbers",
+           Survey::compare(2, 3, c) && c.a == 2 && c.b == 3);
+        ck("dropping the empty slot says nothing was there", !Survey::clearRun(1));
+        ck("a slot past the end is refused", !Survey::clearRun(Survey::RUNS));
+        ck("and neither took anything with it", Survey::runCount() == (uint8_t)(Survey::RUNS - 1));
+        // start() takes the first FREE slot, so the hole is what gets used next
+        // -- the owner who mis-started run 2 gets run 2 back, not run 5.
+        ck("the next start takes the freed slot", Survey::start("again", 3, false, 200000) == 1);
+        ck("and nothing else was disturbed by that either",
+           Survey::run(2, got) && strcmp(got.label, "run2") == 0);
+    }
+
+    suite("Dropping the RECORDING run aborts it; the live trend belongs to no run");
+    {
+        Survey::clear();
+        const int16_t r[] = { -90, -89, -88 };
+        Survey::start("keep", 3, false, 1000);
+        feed(ALPHA, "a", r, 3, 20, 1000);
+        Survey::stop(5000);
+        Survey::start("oops", 3, false, 10000);
+        feed(BRAVO, "b", r, 3, 20, 10000);
+        ck("slot 1 is the one recording", Survey::recording() == 1);
+        ck("dropping it succeeds", Survey::clearRun(1));
+        ck("nothing is recording afterwards", Survey::recording() == -1);
+        ck("and the finished run is still there", Survey::runCount() == 1);
+        Survey::Run got;
+        ck("...under its own number", Survey::run(0, got) && strcmp(got.label, "keep") == 0);
+        // The radio task keeps feeding readings whatever the screen just did, and
+        // a frame arriving one tick later must not resurrect the slot.
+        Survey::noteDirect(Proto::MESHCORE, BRAVO, "b", -90, 20, 11000);
+        ck("a reading after the abort lands in no run",
+           Survey::runCount() == 1 && !Survey::run(1, got));
+        // The trend is a ring per NODE, fed whether or not anything records, and
+        // it is the line the owner watches while turning the antenna. Dropping a
+        // run must not blank it; clear() is the one that takes it.
+        Survey::Sample s[Survey::TREND_LEN];
+        ck("the dropped run's station keeps its trend",
+           Survey::trend(Proto::MESHCORE, BRAVO, s, (uint8_t)Survey::TREND_LEN) > 0);
+        Survey::clear();
+        ck("and clear() takes the trend too",
+           Survey::trend(Proto::MESHCORE, BRAVO, s, (uint8_t)Survey::TREND_LEN) == 0);
+    }
+
     suite("A run keeps the rows it has rather than evicting mid-window");
     {
         Survey::clear();

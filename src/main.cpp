@@ -6286,15 +6286,42 @@ void loop() {
             static int  gestureStartX = 0, gestureStartY = 0;
             static int  lastY = -1;
             static uint32_t gestureDownMs = 0;
-            (void)gestureDownMs;
+            static bool holdFired = false;
             if (touchJustDown) {
                 gestureActive = true;
                 gestureMoved  = false;
+                holdFired     = false;
                 gestureStartX = tp.x;
                 gestureStartY = tp.y;
                 lastY = tp.y;
                 gestureDownMs = now;
                 lastTouch = now;
+            }
+            // A touch that has stayed put long enough to mean "I mean this".
+            // The two numbers are the raw-scan screen's, deliberately: that is
+            // the one hold-to-confirm gesture already on the device (see the
+            // RAWSCAN case's ROW_HOLD_MS), and a second threshold would make the
+            // same physical gesture behave differently on two screens.
+            //
+            // Not gated on gestureMoved: the drag threshold here is a whole row
+            // (uiLoraDragStep, 20 or 32 px), so a thumb can wobble well past
+            // this 12 px and still be called a tap. The hold has to judge the
+            // wobble itself, against the position the touch went DOWN at.
+            constexpr uint32_t LORA_HOLD_MS    = 500;
+            constexpr int32_t  LORA_MOVE_PX_SQ = 12 * 12;
+            if (tp.valid && gestureActive && !holdFired) {
+                const int32_t hdx = tp.x - gestureStartX, hdy = tp.y - gestureStartY;
+                if ((hdx * hdx + hdy * hdy) <= LORA_MOVE_PX_SQ &&
+                    (uint32_t)(now - gestureDownMs) >= LORA_HOLD_MS &&
+                    uiLoraHold(*canvas, gestureStartX, gestureStartY, tft.width(), tft.height())) {
+                    // The screen took it, so this gesture is spent: the release
+                    // must not also arrive as a tap on the panel that just came
+                    // up under the finger. Same rule as RAWSCAN's s_confirmArmed,
+                    // reached by ending the gesture instead of by a second flag.
+                    holdFired     = true;
+                    gestureActive = false;
+                    lastTouch     = now;
+                }
             }
             if (tp.valid && gestureActive) {
                 int dy = tp.y - lastY;

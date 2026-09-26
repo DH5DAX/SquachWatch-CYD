@@ -262,11 +262,17 @@ void clear() {
     s_rec = -1;
 }
 
-void clearRun(uint8_t i) {
-    if (!s_st || i >= RUNS) return;
+bool clearRun(uint8_t i) {
+    if (!s_st || i >= RUNS || !s_st->runs[i].used) return false;
+    // The recording run is allowed, and it is the common case: a mis-started
+    // run is not a finished one. Recording stops with it rather than rolling on
+    // into a slot that has been zeroed under the radio task.
     if (s_rec == (int8_t)i) s_rec = -1;
     memset(&s_st->runs[i], 0, sizeof s_st->runs[i]);
     memset(s_st->acc[i], 0, sizeof s_st->acc[i]);
+    // Nothing is shifted down: see clearRun's comment in the header for why a
+    // run's number has to survive its neighbour going away.
+    return true;
 }
 
 // ---- feeding ---------------------------------------------------------------
