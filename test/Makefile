@@ -23,7 +23,7 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter \
             -I$(SIM) -I$(INC)
 
-TESTS := remote_id_test ibeacon_test signatures_test emitter_roundtrip_test ignore_list_test hacker_test pwnagotchi_test shim_fidelity_test squachmesh_test qwerty_test meshmsg_test device_info_test security_test emote_script_test blackbox_test bingo_test hunt_test bgretire_test autoquiet_test framepush_test touchfit_test logindex_test dex_test regulars_test spam_test
+TESTS := lora_crypto_test lora_meshtastic_test lora_meshcore_test lora_lorawan_test lora_ham_test remote_id_test ibeacon_test signatures_test emitter_roundtrip_test ignore_list_test hacker_test pwnagotchi_test shim_fidelity_test squachmesh_test qwerty_test meshmsg_test device_info_test security_test emote_script_test blackbox_test bingo_test hunt_test bgretire_test autoquiet_test framepush_test touchfit_test logindex_test dex_test regulars_test spam_test
 
 # Only the units under test get linked in. Pulling the whole firmware
 # would drag in TFT_eSPI, NimBLE and the UI, and a test that needs a
@@ -79,6 +79,16 @@ shim_fidelity_test_SRCS      :=
 touchfit_test_SRCS           :=
 # The flood rules are plain arithmetic in spam_watch.h.
 spam_test_SRCS               :=
+# The LoRa decoders' AES, SHA-256, CMAC, HMAC and CRCs, against published vectors.
+lora_crypto_test_SRCS        := $(SRC)/lora_crypto.cpp
+# Meshtastic: the header, the channel hashes, the cipher round trip, the payloads.
+lora_meshtastic_test_SRCS    := $(SRC)/lora_meshtastic.cpp $(SRC)/lora_crypto.cpp
+# MeshCore: the frame, adverts, the Public and hashtag channels' seal, traces.
+lora_meshcore_test_SRCS      := $(SRC)/lora_meshcore.cpp $(SRC)/lora_crypto.cpp
+# LoRaWAN: the envelope, the registry, MAC commands, the MIC and cipher on a published vector, the beacon.
+lora_lorawan_test_SRCS       := $(SRC)/lora_lorawan.cpp $(SRC)/lora_crypto.cpp
+# LoRa APRS, MeshCom and FANET: plaintext, so every field is a coordinate that must land where it says.
+lora_ham_test_SRCS           := $(SRC)/lora_aprs.cpp $(SRC)/lora_fanet.cpp $(SRC)/lora_crypto.cpp
 
 .PHONY: all clean
 all: $(addprefix run-,$(TESTS))

@@ -229,6 +229,7 @@ static void drawCrashCard(TFT_eSPI& t) {
 #include "state.h"
 #include "theme.h"
 #include "detection.h"
+#include "lora_sniffer.h"   // the CrowPanel 7's wireless slot; inline no-ops elsewhere
 #include "clock.h"
 #include "ui_desk.h"
 #include "ui_zone.h"
@@ -3282,6 +3283,12 @@ void setup() {
 #if defined(CROWPANEL7_PERIPH_PROBE)
     crowPeriphProbe();
 #endif
+#if SQUACH_LORA
+    // The wireless slot, after the WiFi and Bluetooth radios: it has its own
+    // task and its own bus, and only the console and DIAGNOSTICS notice it
+    // until the LORA screens exist. Nothing if K1 is on the card.
+    Lora::begin();
+#endif
     // After the engine: the card leans on the lifetime counts to pick which
     // type sits out, and those are read in init().
     Bingo::begin(engine);
@@ -3601,6 +3608,7 @@ void loop() {
         touchJustUp = false;
     }
     engine.loop();
+    Lora::tick(now);   // nothing outside a SQUACH_LORA build
     floodTick();   // nothing outside a FLOOD_BENCH build
     // The heap at the first pass of loop(), for DIAGNOSTICS' BOOT line.
     static uint32_t s_loopHeapFree = 0, s_loopHeapLargest = 0;
