@@ -420,6 +420,7 @@ SquachWatch-CYD/
 │   ├── BUILD.md                  (friendly walkthrough)
 │   ├── PINOUT.md                 (CYD pin map)
 │   ├── DETECTIONS.md             (per-signature provenance)
+│   ├── LORA.md                   (research: the CrowPanel 7's LoRa module)
 │   └── SQUACHWARE-AESTHETIC.md   (CSS → RGB565 mapping)
 ├── include/
 │   ├── state.h                   (DetectionType, Detection, Confidence)
