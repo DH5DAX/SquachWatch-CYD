@@ -231,6 +231,16 @@ namespace Settings {
     bool        buzzerOn();
     void        toggleBuzzer();
 
+    // ---- LORA ------------------------------------------------------------
+    // The wireless slot: OFF, FOCUS on one profile, or SURVEY over the band
+    // (Lora::Mode's values), and which profile FOCUS parks on (an index into
+    // lora_profiles.cpp's table). Only the CrowPanel 7 shows the rows; the
+    // values are kept everywhere, like the buzzer's.
+    uint8_t     loraMode();
+    void        cycleLoraMode();
+    uint8_t     loraFocus();
+    void        setLoraFocus(uint8_t ix);
+
     // ---- STATUS LIGHT ----------------------------------------------------
     // The RGB LED on the back of the 2.8" CYD. See status_light.h for the
     // rules it follows; these are only the knobs. Every one of them is

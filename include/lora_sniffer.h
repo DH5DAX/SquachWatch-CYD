@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "lora_pkt.h"
+#include "lora_nodes.h"
 
 namespace Lora {
 
@@ -57,6 +58,12 @@ uint16_t packetCount();
 bool     packetAt(uint16_t idxFromNewest, Packet& out);
 const Stats& stats();
 
+// The node table, copied out under the sniffer's lock: how many, the order
+// newest first, and one row.
+uint8_t nodeCount();
+uint8_t nodeOrder(uint8_t* idx, uint8_t cap);
+bool    nodeAt(uint8_t i, Nodes::Node& out);
+
 // The "LORA ..." console commands; true if the line was one.
 bool console(const char* line);
 #else
@@ -75,6 +82,9 @@ inline uint32_t packetTotal() { return 0; }
 inline uint16_t packetCount() { return 0; }
 inline bool packetAt(uint16_t, Packet&) { return false; }
 inline const Stats& stats() { static Stats s = {}; return s; }
+inline uint8_t nodeCount() { return 0; }
+inline uint8_t nodeOrder(uint8_t*, uint8_t) { return 0; }
+inline bool nodeAt(uint8_t, Nodes::Node&) { return false; }
 inline bool console(const char*) { return false; }
 #endif
 

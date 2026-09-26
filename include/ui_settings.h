@@ -63,6 +63,9 @@ enum class SettingsRow : uint8_t {
     WATCH_XTAL,      // the T-Watch only: CLOCK CHECK, the ESP32's crystal against the clock chip's
 #if defined(CROWPANEL7)
     BUZZER,          // the CrowPanel 7 only, the one board with a buzzer: OFF, or NEW ONLY
+    LORA,            // the CrowPanel 7 only: opens the LORA screen (SYSTEM page)
+    LORA_MODE,       // ...and the slot's mode: OFF, FOCUS, SURVEY
+    LORA_PROFILE,    // ...and which profile FOCUS parks on
 #endif
     BACK,
     COUNT,

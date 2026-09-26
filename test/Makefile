@@ -23,7 +23,7 @@ CXX      ?= g++
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter \
             -I$(SIM) -I$(INC)
 
-TESTS := lora_crypto_test lora_meshtastic_test lora_meshcore_test lora_lorawan_test lora_ham_test remote_id_test ibeacon_test signatures_test emitter_roundtrip_test ignore_list_test hacker_test pwnagotchi_test shim_fidelity_test squachmesh_test qwerty_test meshmsg_test device_info_test security_test emote_script_test blackbox_test bingo_test hunt_test bgretire_test autoquiet_test framepush_test touchfit_test logindex_test dex_test regulars_test
+TESTS := lora_crypto_test lora_meshtastic_test lora_meshcore_test lora_lorawan_test lora_ham_test lora_nodes_test remote_id_test ibeacon_test signatures_test emitter_roundtrip_test ignore_list_test hacker_test pwnagotchi_test shim_fidelity_test squachmesh_test qwerty_test meshmsg_test device_info_test security_test emote_script_test blackbox_test bingo_test hunt_test bgretire_test autoquiet_test framepush_test touchfit_test logindex_test dex_test regulars_test
 
 # Only the units under test get linked in. Pulling the whole firmware
 # would drag in TFT_eSPI, NimBLE and the UI, and a test that needs a
@@ -87,6 +87,8 @@ lora_meshcore_test_SRCS      := $(SRC)/lora_meshcore.cpp $(SRC)/lora_crypto.cpp
 lora_lorawan_test_SRCS       := $(SRC)/lora_lorawan.cpp $(SRC)/lora_crypto.cpp
 # LoRa APRS, MeshCom and FANET: plaintext, so every field is a coordinate that must land where it says.
 lora_ham_test_SRCS           := $(SRC)/lora_aprs.cpp $(SRC)/lora_fanet.cpp $(SRC)/lora_crypto.cpp
+# The node table, fed by every decoder.
+lora_nodes_test_SRCS         := $(SRC)/lora_nodes.cpp $(SRC)/lora_classify.cpp $(SRC)/lora_pkt.cpp $(SRC)/lora_profiles.cpp $(SRC)/lora_meshtastic.cpp $(SRC)/lora_meshcore.cpp $(SRC)/lora_lorawan.cpp $(SRC)/lora_aprs.cpp $(SRC)/lora_fanet.cpp $(SRC)/lora_crypto.cpp
 
 .PHONY: all clean
 all: $(addprefix run-,$(TESTS))

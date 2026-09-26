@@ -230,6 +230,8 @@ static void drawCrashCard(TFT_eSPI& t) {
 #include "theme.h"
 #include "detection.h"
 #include "lora_sniffer.h"   // the CrowPanel 7's wireless slot; inline no-ops elsewhere
+#include "ui_lora.h"
+#include "lora_profiles.h"
 #include "clock.h"
 #include "ui_desk.h"
 #include "ui_zone.h"
@@ -1478,6 +1480,11 @@ static void enterDex() {
     state = AppState::DEX;
     transitionStart = millis();
     uiDexInit(*canvas);
+}
+static void enterLora() {
+    state = AppState::LORA;
+    transitionStart = millis();
+    uiLoraInit(*canvas);
 }
 
 static void enterSquadUpdate() {
@@ -3380,6 +3387,7 @@ static const char* timedScreenName(AppState s) {
     switch (s) {
         case AppState::CLEAR:       return "MAIN";
         case AppState::LOG:         return "LOG";
+        case AppState::LORA:        return "LORA";
         case AppState::DESK:        return "DESK";
         case AppState::RAWSCAN:     return "SCAN";
         case AppState::HUNT:        return "HUNT";
@@ -5172,6 +5180,22 @@ void loop() {
                         case SettingsRow::VIEW_DIARY:   enterDiary(); break;
                         case SettingsRow::BINGO:        enterBingo(); break;
                         case SettingsRow::DEX:          enterDex(); break;
+#if defined(CROWPANEL7)
+                        case SettingsRow::LORA:         enterLora(); break;
+                        case SettingsRow::LORA_MODE:
+                            Settings::cycleLoraMode();
+                            Lora::setMode((Lora::Mode)Settings::loraMode());
+                            break;
+                        case SettingsRow::LORA_PROFILE: {
+                            // Steps through the table; FOCUS follows at once
+                            // so the change can be heard while the row is
+                            // still under the finger.
+                            const uint8_t next = (uint8_t)((Settings::loraFocus() + 1) % Lora::profileCount());
+                            Settings::setLoraFocus(next);
+                            Lora::setFocus(next);
+                            break;
+                        }
+#endif
                         case SettingsRow::APPEARANCE:  uiSettingsOpenAppearance(true); break;
                         case SettingsRow::TOP_HAT:     Settings::toggleTopHat(); break;
                         // From a sub-page, back to the main list; from the
@@ -6078,6 +6102,43 @@ void loop() {
             }
             break;
         }
+        case AppState::LORA: {
+            drawTwoBand([&](TFT_eSPI& t, bool advance) { uiLoraTick(t, now, engine, advance); });
+            // Drag to scroll, tap for the rows and the bar: the settings
+            // screen's gesture, with trackers of its own like every other
+            // list screen keeps.
+            static bool gestureActive = false;
+            static bool gestureMoved  = false;
+            static int  gestureStartX = 0, gestureStartY = 0;
+            static int  lastY = -1;
+            static uint32_t gestureDownMs = 0;
+            (void)gestureDownMs;
+            if (touchJustDown) {
+                gestureActive = true;
+                gestureMoved  = false;
+                gestureStartX = tp.x;
+                gestureStartY = tp.y;
+                lastY = tp.y;
+                gestureDownMs = now;
+                lastTouch = now;
+            }
+            if (tp.valid && gestureActive) {
+                int dy = tp.y - lastY;
+                if (abs(dy) > 10) {
+                    gestureMoved = true;
+                    uiLoraScroll(dy > 0 ? -1 : 1);
+                    lastY = tp.y;
+                }
+            }
+            if (touchJustUp && gestureActive) {
+                gestureActive = false;
+                if (!gestureMoved && uiLoraTap(*canvas, gestureStartX, gestureStartY, tft.width(), tft.height()) == LoraTap::BACK) {
+                    uiSettingsOpenPage(SettingsPage::SYSTEM);
+                    enterSettings();
+                }
+            }
+            break;
+        }
         case AppState::DIAGNOSTICS: {
             DiagnosticsInfo info;
             {
@@ -6118,6 +6179,7 @@ void loop() {
             info.lastScreenName = s_lastScreenName;
             info.lastScreenUs   = s_lastScreenUs;
             info.freeHeap = ESP.getFreeHeap();
+            Lora::statusLine(info.lora, sizeof info.lora);
             info.largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
             info.resetReason = resetReasonName();
             info.loopFree    = s_loopHeapFree;

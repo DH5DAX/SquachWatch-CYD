@@ -145,6 +145,12 @@ static uint8_t  s_radioDutyIx  = RADIO_DUTY_DEFAULT;
 // stays off until somebody finds the row. Only the CrowPanel 7 shows it.
 static bool     s_buzzer       = false;
 
+// ---- LoRa -----------------------------------------------------------------
+// SURVEY by default: the detector posture, everything in the band. FOCUS is
+// the sysop's, set from the LORA screen or the console.
+static uint8_t  s_loraMode     = 2;
+static uint8_t  s_loraFocus    = 0;
+
 // ---- status light --------------------------------------------------------
 static bool    s_lightOn     = true;
 static bool    s_lightAlerts = true;
@@ -262,6 +268,10 @@ void toggleWakeOnAlert() {
 }
 bool buzzerOn()     { return s_buzzer; }
 void toggleBuzzer() { s_buzzer = !s_buzzer; s_prefs.putBool("buzzer", s_buzzer); }
+uint8_t loraMode()  { return s_loraMode; }
+void cycleLoraMode() { s_loraMode = (uint8_t)((s_loraMode + 1) % 3); s_prefs.putUChar("loraMode", s_loraMode); }
+uint8_t loraFocus() { return s_loraFocus; }
+void setLoraFocus(uint8_t ix) { s_loraFocus = ix; s_prefs.putUChar("loraFocus", ix); }
 
 // ---- easter-egg hunt progress ----------------------------------------
 // Packed into one NVS entry rather than one each: the store has a few
@@ -383,6 +393,9 @@ void load() {
     // The T-Watch's BUZZ (haptics on an alert) already owns "buzz", and with
     // the opposite default, so the CrowPanel's buzzer keeps its own key.
     s_buzzer       = s_prefs.getBool("buzzer", false);
+    s_loraMode     = s_prefs.getUChar("loraMode", 2);
+    if (s_loraMode > 2) s_loraMode = 2;
+    s_loraFocus    = s_prefs.getUChar("loraFocus", 0);
     s_lightOn      = s_prefs.getBool("ltOn", true);
     s_lightAlerts  = s_prefs.getBool("ltAlert", true);
     s_lightMsgs    = s_prefs.getBool("ltMsg", true);
