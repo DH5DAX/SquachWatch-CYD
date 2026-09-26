@@ -12,7 +12,9 @@
 
 namespace Lora {
 
-enum class Mode : uint8_t { OFF = 0, FOCUS = 1, SURVEY = 2, COUNT = 3 };
+// SWEEP is the spectrum: the radio walks the band reading the instantaneous
+// RSSI and hears nothing else meanwhile. Not a saved setting.
+enum class Mode : uint8_t { OFF = 0, FOCUS = 1, SURVEY = 2, SWEEP = 3, COUNT = 4 };
 const char* modeName(Mode m);
 
 // Counters since boot, for the CHANNEL screen and the console.
@@ -64,6 +66,18 @@ uint8_t nodeCount();
 uint8_t nodeOrder(uint8_t* idx, uint8_t cap);
 bool    nodeAt(uint8_t i, Nodes::Node& out);
 
+// The spectrum from SWEEP: one value per bin from 863.0 to 870.0 MHz in
+// 50 kHz steps, as dBm + 150 (0 = nothing yet). `hold` keeps the loudest
+// reading with a slow decay. Returns the bin count.
+static const uint8_t SPECTRUM_BINS = 141;
+uint8_t spectrum(uint8_t* live, uint8_t* hold, uint8_t cap);
+uint32_t spectrumSweeps();
+
+// LoRaTap over the console: every frame as one "[tap] <hex>" line, which
+// tools/loratap2pcap.py turns into a capture Wireshark opens.
+void setTap(bool on);
+bool tap();
+
 // The "LORA ..." console commands; true if the line was one.
 bool console(const char* line);
 #else
@@ -85,6 +99,11 @@ inline const Stats& stats() { static Stats s = {}; return s; }
 inline uint8_t nodeCount() { return 0; }
 inline uint8_t nodeOrder(uint8_t*, uint8_t) { return 0; }
 inline bool nodeAt(uint8_t, Nodes::Node&) { return false; }
+static const uint8_t SPECTRUM_BINS = 141;
+inline uint8_t spectrum(uint8_t*, uint8_t*, uint8_t) { return 0; }
+inline uint32_t spectrumSweeps() { return 0; }
+inline void setTap(bool) {}
+inline bool tap() { return false; }
 inline bool console(const char*) { return false; }
 #endif
 

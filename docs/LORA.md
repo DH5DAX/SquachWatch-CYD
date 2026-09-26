@@ -13,6 +13,35 @@ not be confirmed from a primary source is marked **unverified**. Some questions
 only the board itself can answer; those are collected in
 [Measure first](#10-measure-first).
 
+## What is built
+
+The research below became code on 2026-09-26, in the `crowpanel7` build
+(`-DSQUACH_LORA`), and none of it has met the board yet: it compiles, the
+decoders pass their desktop tests against published vectors, and
+[Measure first](#10-measure-first) is still the list of what only the
+hardware can answer.
+
+- **Bring-up** (`lora_radio.cpp`): a reset pulse and a raw read of the
+  version register before RadioLib, then the TCXO voltages tried in the
+  datasheet's order. `LORA` on the console says what it found;
+  DIAGNOSTICS has a LORA line.
+- **The sniffer** (`lora_sniffer.cpp`): its own task, a ring in PSRAM,
+  FOCUS and SURVEY (CAD rotation with a two-second linger after a hit), a
+  SWEEP that draws 863–870 MHz, and `LORA TAP` for Wireshark through
+  `tools/loratap2pcap.py`. Profiles are section 4's table, in
+  `lora_profiles.cpp`.
+- **Decoders**, each standalone with a host test: Meshtastic, MeshCore,
+  LoRaWAN, LoRa APRS, MeshCom and FANET. The keys the user holds go in
+  through `Meshtastic::addChannel`, `MeshCore::addChannel` and
+  `LoRaWAN::addSession`; a settings screen for them is still to do.
+- **The LORA screen** (`ui_lora.cpp`): LIST, FRAME, NODES with the sysop
+  flags, CHANNEL with the counters and the spectrum. LORA MODE and LORA
+  PROFILE on the SYSTEM page.
+- **Not built**: the FSK profiles (OGN, ADS-L, wM-Bus), transmitting, the
+  `LORA_TRACKER` detection, and the LoRaWAN downlink chase and beacon
+  scheduling; the profiles for RX2 and the beacon exist and FOCUS can park
+  on them.
+
 ## The short version
 
 - **The module is a Semtech SX1262** with a TCXO and an RF switch driven by

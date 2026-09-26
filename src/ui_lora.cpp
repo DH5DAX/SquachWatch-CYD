@@ -6,6 +6,7 @@
 #include "lora_profiles.h"
 #include "lora_classify.h"
 #include "lora_nodes.h"
+#include "settings.h"
 #include <Arduino.h>
 #include <string.h>
 #include <stdio.h>
@@ -215,6 +216,41 @@ int statLine(TFT_eSPI& t, int y, uint16_t col, const char* label, const char* te
     return y + t.fontHeight() + 2;
 }
 
+// The spectrum from a SWEEP, when there has been one: the hold in the dim
+// colour, the live reading bright, 863 to 870 MHz across the width.
+int drawSpectrum(TFT_eSPI& t, int w, int y, int bottom) {
+    uint8_t live[Lora::SPECTRUM_BINS], hold[Lora::SPECTRUM_BINS];
+    const uint8_t n = Lora::spectrum(live, hold, Lora::SPECTRUM_BINS);
+    if (!n || !Lora::spectrumSweeps()) return y;
+    const int gh = bottom - y - 12;
+    if (gh < 30) return y;
+    const int x0 = 24, gw = w - x0 - 6;
+    // The floor of the scale is -140 dBm (value 10), the top -60 (value 90).
+    auto bar = [&](uint8_t v) { int h = ((int)v - 10) * gh / 80; return h < 0 ? 0 : h > gh ? gh : h; };
+    t.drawRect(x0 - 1, y, gw + 2, gh + 2, Theme::PURPLE);
+    for (uint8_t i = 0; i < n; i++) {
+        const int x = x0 + (int)((long)i * gw / n);
+        const int bw = (int)((long)(i + 1) * gw / n) - (int)((long)i * gw / n);
+        const int hh = bar(hold[i]), lh = bar(live[i]);
+        if (hh) t.fillRect(x, y + 1 + gh - hh, bw > 1 ? bw - 1 : 1, hh, Theme::VAPOR_PURPLE);
+        if (lh) t.fillRect(x, y + 1 + gh - lh, bw > 1 ? bw - 1 : 1, lh, Theme::CYAN);
+    }
+    t.setTextSize(1);
+    t.setTextColor(Theme::CYAN, Theme::BG);
+    t.setCursor(0, y); t.print("-60");
+    t.setCursor(0, y + gh - t.fontHeight()); t.print("-140");
+    const int ly = y + gh + 3;
+    for (int mhz = 863; mhz <= 870; mhz++) {
+        const int x = x0 + (mhz - 863) * gw / 7;
+        t.drawFastVLine(x, y + gh - 3, 3, Theme::WHITE);
+        if (mhz % 2 == 1 || mhz == 870) {
+            char l[8]; snprintf(l, sizeof l, "%d", mhz);
+            t.setCursor(x - (mhz == 870 ? t.textWidth(l) : t.textWidth(l) / 2), ly); t.print(l);
+        }
+    }
+    return bottom;
+}
+
 void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     (void)now;
     t.setTextSize(1);
@@ -244,6 +280,13 @@ void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     if (s.byProto[0]) snprintf(b + o, sizeof b - o, "%s?? %u", o ? "  " : "", (unsigned)s.byProto[0]);
     y = statLine(t, y, Theme::CYAN, "BY NET:", o || s.byProto[0] ? b : "-");
     y += 4;
+    if (Lora::mode() == Lora::Mode::SWEEP || Lora::spectrumSweeps()) {
+        snprintf(b, sizeof b, "%lu passes over 863-870 MHz%s", (unsigned long)Lora::spectrumSweeps(),
+                 Lora::mode() == Lora::Mode::SWEEP ? "; tap the status line to stop" : "");
+        y = statLine(t, y, Theme::CYAN, "SWEEP:", b);
+        drawSpectrum(t, w, y + 2, bottom);
+        return;
+    }
     // The busiest profiles as bars.
     uint8_t top8[8]; uint8_t n8 = 0;
     for (uint8_t i = 0; i < Lora::profileCount() && i < 64; i++) {
@@ -328,6 +371,15 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
                 break;
             }
         }
+        return LoraTap::HANDLED;
+    }
+    // The status line cycles the mode: OFF, FOCUS, SURVEY, SWEEP. The
+    // first three are the setting; SWEEP is for now and is not kept.
+    t.setTextSize(1);
+    if (Lora::present() && y >= BODY_TOP && y < BODY_TOP + 1 + t.fontHeight() + 3) {
+        const uint8_t next = (uint8_t)(((uint8_t)Lora::mode() + 1) % (uint8_t)Lora::Mode::COUNT);
+        Lora::setMode((Lora::Mode)next);
+        if (next < 3) { while (Settings::loraMode() != next) Settings::cycleLoraMode(); }
         return LoraTap::HANDLED;
     }
     if (s_view == LoraView::LIST && y >= BODY_TOP) {
