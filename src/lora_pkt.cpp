@@ -53,7 +53,8 @@ bool autoLdro(uint8_t sf, uint16_t bwKhz10) {
 uint32_t timeOnAirUs(uint8_t sf, uint16_t bwKhz10, uint8_t cr, uint16_t preamble,
                      uint8_t len, bool crc, bool implicit, bool forceLdro) {
     if (sf < 5 || sf > 12 || !bwKhz10) return 0;
-    if (cr < 5) cr = 5; if (cr > 8) cr = 8;
+    if (cr < 5) cr = 5;
+    if (cr > 8) cr = 8;
     const bool ldro = forceLdro || autoLdro(sf, bwKhz10);
     // n = 8*PL + 16*CRC - 4*SF + 20*explicit + 8*(SF>6), never below zero
     int32_t n = 8 * (int32_t)len + (crc ? 16 : 0) - 4 * (int32_t)sf + (implicit ? 0 : 20) + (sf > 6 ? 8 : 0);

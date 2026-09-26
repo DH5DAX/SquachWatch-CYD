@@ -110,6 +110,7 @@ void uiDiagnosticsTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, co
     }
     y = drawLine(t, y, Theme::CYAN, "SLOT:", "%s  other: %s",
                  info.otaSlot ? info.otaSlot : "?", info.otaOther ? info.otaOther : "none");
+    if (info.lora[0]) y = drawLine(t, y, Theme::CYAN, "LORA:", "%s", info.lora);
     // The black box: what is kept in flash across restarts. The newest crash
     // kept by date and version, which is what a photo of this screen needs
     // to match it to a build; BLACKBOX on the console has the rest.

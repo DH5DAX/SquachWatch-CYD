@@ -16,6 +16,7 @@
 #include "lora_profiles.h"
 #include "lora_classify.h"
 #include "clock.h"
+#include "settings.h"
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -90,6 +91,7 @@ void push(Packet& pk) {
     s_stats.airtimeMs += pk.toaUs / 1000;
     if (pk.profile < 64) s_stats.byProfile[pk.profile]++;
     s_stats.byProto[(int)pk.proto]++;
+    Nodes::note(pk, pk.ms, pk.epoch);
     xSemaphoreGive(s_lock);
 }
 
@@ -228,7 +230,11 @@ bool begin() {
     for (uint8_t i = 0; i < profileCount() && i < 64; i++)
         if (!(profile(i).flags & PF_433)) mask |= 1ull << i;
     s_survey = mask;
-    s_focus = defaultProfile();
+    s_focus = Settings::loraFocus() < profileCount() ? Settings::loraFocus() : defaultProfile();
+    s_mode = (Mode)Settings::loraMode();
+#if defined(LORA_PROBE)
+    s_mode = Mode::FOCUS;   // the bench parks; the survey is for the field
+#endif
 
     Serial.printf("[lora] up: %s, TCXO %s, ring of %u in %s\n", s_up.version,
                   s_up.tcxoDeci ? "on" : "off (crystal)", (unsigned)s_cap,
@@ -305,6 +311,21 @@ bool packetAt(uint16_t idx, Packet& out) {
 }
 
 const Stats& stats() { return s_stats; }
+
+uint8_t nodeCount() { return Nodes::count(); }
+uint8_t nodeOrder(uint8_t* idx, uint8_t cap) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    const uint8_t n = Nodes::order(idx, cap);
+    xSemaphoreGive(s_lock);
+    return n;
+}
+bool nodeAt(uint8_t i, Nodes::Node& out) {
+    if (!s_lock || xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+    const Nodes::Node* n = Nodes::at(i);
+    if (n) memcpy(&out, n, sizeof out);
+    xSemaphoreGive(s_lock);
+    return n != nullptr;
+}
 
 bool console(const char* line) {
     if (strncasecmp(line, "LORA", 4) != 0) return false;

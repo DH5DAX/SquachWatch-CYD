@@ -90,6 +90,17 @@ UI_SRCS  := $(SRC)/theme.cpp \
             $(SRC)/regulars.cpp \
             $(SRC)/notices.cpp \
             $(SRC)/ui_dex.cpp \
+            $(SRC)/ui_lora.cpp \
+            $(SRC)/lora_pkt.cpp \
+            $(SRC)/lora_profiles.cpp \
+            $(SRC)/lora_crypto.cpp \
+            $(SRC)/lora_classify.cpp \
+            $(SRC)/lora_meshtastic.cpp \
+            $(SRC)/lora_meshcore.cpp \
+            $(SRC)/lora_lorawan.cpp \
+            $(SRC)/lora_aprs.cpp \
+            $(SRC)/lora_fanet.cpp \
+            $(SRC)/lora_nodes.cpp \
             $(SRC)/detection_info.cpp \
             $(SRC)/device_info.cpp \
             $(SRC)/idle_events.cpp \

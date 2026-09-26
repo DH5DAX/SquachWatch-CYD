@@ -1,5 +1,7 @@
 // SquachWatch-CYD — settings screen implementation
 #include "ui_settings.h"
+#include "lora_sniffer.h"
+#include "lora_profiles.h"
 #include "ota_core.h"
 #include "ota_wifi.h"
 #include "theme.h"
@@ -139,6 +141,11 @@ static const SettingsRow SYSTEM_ROWS[] = {
 #endif
     SettingsRow::CALIBRATE, SettingsRow::CHECK_COLORS,
     SettingsRow::DIAGNOSTICS, SettingsRow::UPDATE_FIRMWARE, SettingsRow::UPDATE_CHECK, SettingsRow::WIFI_NETWORKS,
+#if defined(CROWPANEL7)
+    // The wireless slot, on the one board that has it: the screen, the
+    // mode, and the profile FOCUS parks on.
+    SettingsRow::LORA, SettingsRow::LORA_MODE, SettingsRow::LORA_PROFILE,
+#endif
     SettingsRow::RESET_STATS,
 };
 static const uint8_t SYSTEM_ROWS_N = sizeof(SYSTEM_ROWS) / sizeof(SYSTEM_ROWS[0]);
@@ -924,6 +931,19 @@ static void rowContent(SettingsRow r, const DetectionEngine& eng, char* valBuf, 
         case SettingsRow::DIAGNOSTICS:
             label = "DIAGNOSTICS";
             break;
+#if defined(CROWPANEL7)
+        case SettingsRow::LORA:
+            label = "LORA";
+            if (!Lora::present()) value = "NO MODULE >";
+            else { snprintf(valBuf, valBufN, "%lu PKTS >", (unsigned long)Lora::packetTotal()); value = valBuf; }
+            break;
+        case SettingsRow::LORA_MODE:
+            label = "LORA MODE"; value = Lora::modeName((Lora::Mode)Settings::loraMode());
+            break;
+        case SettingsRow::LORA_PROFILE:
+            label = "LORA PROFILE"; value = Lora::profile(Settings::loraFocus()).name;
+            break;
+#endif
         case SettingsRow::UPDATE_FIRMWARE:
             // The row names the newer version when one is known, so the boot
             // check and a member's hello have somewhere to point.
