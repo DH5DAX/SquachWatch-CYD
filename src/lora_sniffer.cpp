@@ -32,6 +32,7 @@ const char* modeName(Mode m) {
     switch (m) {
         case Mode::FOCUS:  return "FOCUS";
         case Mode::SURVEY: return "SURVEY";
+        case Mode::SWEEP:  return "SWEEP";
         default:           return "OFF";
     }
 }
@@ -54,6 +55,13 @@ volatile bool     s_dumpHex = true;    // the probe build shows every byte
 #else
 volatile bool     s_dumpHex = false;   // the console's LORA HEX switch
 #endif
+
+volatile bool     s_tap = false;
+
+// The spectrum, from SWEEP: 863.0 to 870.0 MHz in 50 kHz steps.
+uint8_t  s_specLive[SPECTRUM_BINS];
+uint8_t  s_specHold[SPECTRUM_BINS];
+uint32_t s_sweeps = 0;
 
 // The ring. PSRAM when there is any, written one whole record at a time,
 // which is the sequential kind of write the panel tolerates.
@@ -146,6 +154,31 @@ void task(void*) {
             if (listening) { LoraRadio::standby(); listening = false; }
             onMode = Mode::OFF;
             vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        if (want == Mode::SWEEP) {
+            // One pass over the band: tune, let the front end settle, read
+            // the instantaneous RSSI twice and keep the louder. A pass takes
+            // about a second; the hold decays a notch per pass.
+            if (onMode != Mode::SWEEP) {
+                LoraRadio::apply(profile(s_focus));
+                listening = LoraRadio::startReceive();
+                onMode = Mode::SWEEP;
+            }
+            for (uint8_t i = 0; i < SPECTRUM_BINS && s_mode == Mode::SWEEP; i++) {
+                LoraRadio::tuneHz(863000000u + 50000u * i);
+                vTaskDelay(pdMS_TO_TICKS(2));
+                int16_t best = LoraRadio::rssiNow();
+                vTaskDelay(1);
+                const int16_t r2 = LoraRadio::rssiNow();
+                if (r2 > best) best = r2;
+                int v = best + 150; if (v < 1) v = 1; if (v > 120) v = 120;
+                s_specLive[i] = (uint8_t)v;
+                if (s_specLive[i] > s_specHold[i]) s_specHold[i] = s_specLive[i];
+                else if (s_specHold[i] > 1) s_specHold[i]--;
+            }
+            s_sweeps++;
             continue;
         }
 
@@ -284,10 +317,43 @@ void tick(uint32_t now) {
             hexDump(pk, 16, hex, sizeof hex);
             Serial.println(hex);
         }
+        if (s_tap) {
+            // LoRaTap version 0: fifteen bytes, big-endian, then the frame.
+            // RSSI fields are dBm + 139 as the format wants; SNR is x4 in
+            // two's complement, which is how the record already holds it.
+            uint8_t h[15];
+            h[0] = 0; h[1] = 0; h[2] = 0; h[3] = 15;
+            h[4] = (uint8_t)(pk.freqHz >> 24); h[5] = (uint8_t)(pk.freqHz >> 16); h[6] = (uint8_t)(pk.freqHz >> 8); h[7] = (uint8_t)pk.freqHz;
+            h[8] = (uint8_t)(pk.bwKhz10 / 1250);
+            h[9] = pk.sf;
+            const int r = pk.rssi + 139;
+            h[10] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
+            h[11] = h[10];
+            const int c = s_stats.noiseDbm + 139;
+            h[12] = (uint8_t)(c < 0 ? 0 : c > 255 ? 255 : c);
+            h[13] = (uint8_t)pk.snr4;
+            h[14] = pk.sync;
+            char out[2 * (15 + 255) + 1];
+            char* o = out;
+            static const char* D = "0123456789abcdef";
+            for (int i = 0; i < 15; i++) { *o++ = D[h[i] >> 4]; *o++ = D[h[i] & 15]; }
+            for (int i = 0; i < pk.len; i++) { *o++ = D[pk.data[i] >> 4]; *o++ = D[pk.data[i] & 15]; }
+            *o = '\0';
+            Serial.printf("[tap] %s\n", out);
+        }
     }
 }
 
-void setMode(Mode m) { s_mode = m; }
+void setMode(Mode m) { if (m == Mode::SWEEP) { memset(s_specLive, 0, sizeof s_specLive); memset(s_specHold, 0, sizeof s_specHold); s_sweeps = 0; } s_mode = m; }
+uint8_t spectrum(uint8_t* live, uint8_t* hold, uint8_t cap) {
+    const uint8_t n = cap < SPECTRUM_BINS ? cap : SPECTRUM_BINS;
+    if (live) memcpy(live, (const void*)s_specLive, n);
+    if (hold) memcpy(hold, (const void*)s_specHold, n);
+    return n;
+}
+uint32_t spectrumSweeps() { return s_sweeps; }
+void setTap(bool on) { s_tap = on; }
+bool tap() { return s_tap; }
 Mode mode() { return s_mode; }
 void setFocus(uint8_t i) { if (i < profileCount()) s_focus = i; }
 uint8_t focus() { return s_focus; }
@@ -362,6 +428,8 @@ bool console(const char* line) {
         return true;
     }
     if (strcasecmp(a, "SURVEY") == 0) { setMode(Mode::SURVEY); Serial.println("[lora] survey"); return true; }
+    if (strcasecmp(a, "SWEEPING") == 0 || strcasecmp(a, "SPECTRUM") == 0) { setMode(Mode::SWEEP); Serial.println("[lora] sweeping 863-870 MHz; the CHANNEL view draws it"); return true; }
+    if (strcasecmp(a, "TAP") == 0) { s_tap = !s_tap; Serial.printf("[lora] LoRaTap lines %s\n", s_tap ? "on: tools/loratap2pcap.py turns the log into a pcap" : "off"); return true; }
     if (strcasecmp(a, "OFF") == 0)    { setMode(Mode::OFF); Serial.println("[lora] off"); return true; }
     if (strcasecmp(a, "HEX") == 0)    { s_dumpHex = !s_dumpHex; Serial.printf("[lora] hex dumps %s\n", s_dumpHex ? "on" : "off"); return true; }
     if (strcasecmp(a, "ALL") == 0) {
@@ -396,7 +464,7 @@ bool console(const char* line) {
         setMode(was);
         return true;
     }
-    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | OFF | ALL | MASK <hex> | HEX | SWEEP [kHz from to step]");
+    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | SWEEP [kHz from to step]");
     return true;
 }
 

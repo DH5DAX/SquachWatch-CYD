@@ -56,6 +56,7 @@ full reasoning.
 | Buzzer | the helper: 246 on, 247 off (the optional audible alert, below) |
 | Clock chip | PCF8563 at 0x51, no backup cell on the tested unit (time is not held across power-off) |
 | SD card | GPIO 6/4/5 through a CH486F switch shared with the I2S amplifier and the wireless header; **K1**, a two-position DIP switch on the board, selects — both open is the card. Not used by this build |
+| Wireless slot | Elecrow's SX1262 module on the same three pins with K1 on the WM position (S1 0, S0 1); NSS 8, DIO1 20, RESET 19, BUSY 2; the RF switch on the module's own DIO2 and a TCXO on its DIO3. See the LoRa section below and [LORA.md](LORA.md) |
 | Status LED | none (GPIO16 is the touch clock; the CYD's LED pins are left alone) |
 | Serial | CH340K to UART0, 115200; no native USB |
 | Partitions | `partitions_crowpanel7.csv`: two 4 MB app slots, the black box at 0x810000 |
@@ -88,6 +89,31 @@ no other board has a buzzer -- the rule elsewhere stands. The firmware
 silences the buzzer at every boot, because the helper keeps its state
 across a reset and a crash mid-chirp would otherwise leave it sounding.
 
+## LoRa
+
+With Elecrow's SX1262 module in the slot and K1 on the wireless position,
+the build listens: docs/LORA.md is the research, and its "What is built"
+section the state of the code. Bring-up prints to the console what it
+found -- BUSY falling after the reset pulse, the chip's version string,
+which TCXO voltage started the oscillator -- and `LORA` at any time repeats
+it with the counters. `LORA LIST` names the profiles, `LORA FOCUS n` parks
+on one, `LORA SURVEY` walks them, `LORA SPECTRUM` sweeps the band,
+`LORA HEX` dumps every frame, `LORA TAP` streams LoRaTap lines that
+`tools/loratap2pcap.py` makes a Wireshark capture of. On the screen it is
+SETTINGS > SYSTEM > LORA, with LORA MODE and LORA PROFILE beside it; the
+status line on that screen cycles the mode with a tap.
+
+The slot and the SD card cannot both answer, and the firmware does not try
+to tell which one is fitted beyond the version register: with K1 on the
+card, the LORA row reads NO MODULE and nothing else changes.
+`crowpanel7-loraprobe` is the product build with the hex dumps on and
+FOCUS as the starting mode, for the bench.
+
+Nothing here has run on the hardware yet. The list of what only the board
+can answer -- the DIP switch's labels, the module's band, the TCXO's
+voltage, the interrupt on GPIO 20 while the panel refreshes -- is at the
+end of LORA.md.
+
 ## Validation and remaining checks
 
 Tested on one unit, through an afternoon of bench work rather than a
@@ -99,7 +125,8 @@ about 80 KB of internal RAM free with both radios up.
 
 Not yet exercised: an actual over-the-air install (there is no published
 build for this target), Bluetooth updates, the SD log (K1 on the tested
-unit selects the amplifier), a multi-day soak, a second unit. The
+unit selects the amplifier), the LoRa slot (no module on the tested unit),
+a multi-day soak, a second unit. The
 `crowpanel7-paneltest` and `crowpanel7-probe` environments are bench
 builds for the next person: a static test picture with the radios off or
 on, and a report of the helper MCU, clock chip, card slot and a WiFi scan
