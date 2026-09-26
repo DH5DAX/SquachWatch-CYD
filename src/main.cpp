@@ -1471,6 +1471,14 @@ static void enterUpdate() {
     uiUpdateInit(*canvas);
 }
 
+// Which door the LORA screen was opened by, so BACK can undo that one. Two
+// reach it now -- SETTINGS > SYSTEM > LORA, and the main screen's LORA pill --
+// and coming out of the pill into a settings page nobody opened is how a door
+// stops reading as a door. Declared out here rather than beside enterLora()
+// below because the AppState::LORA handler, which is what reads it, is
+// compiled on every board while enterLora() sits inside SQUACH_MESH.
+static bool s_loraFromClear = false;
+
 #if SQUACH_MESH
 // ---- the squad update -----------------------------------------------------
 // A nudge heard on the mesh waits here until the main screen is showing,
@@ -1510,9 +1518,10 @@ static void enterDex() {
     transitionStart = millis();
     uiDexInit(*canvas);
 }
-static void enterLora(LoraView view = LoraView::LIST) {
+static void enterLora(LoraView view = LoraView::LIST, bool fromClear = false) {
     state = AppState::LORA;
     transitionStart = millis();
+    s_loraFromClear = fromClear;
     uiLoraInit(*canvas, view);
 }
 
@@ -4327,6 +4336,23 @@ void loop() {
             } else if (!boring && Squachy::onboardingActive() && tp.valid && (now - lastTouch) > TOUCH_DEBOUNCE_MS &&
                 Squachy::onboardingTapAdvance(tp.x, tp.y)) {
                 lastTouch = now;
+#if defined(CROWPANEL7)
+            } else if (touchJustDown && (now - lastTouch) > TOUCH_DEBOUNCE_MS &&
+                       uiClearLoraPillHit(tp.x, tp.y)) {
+                // The LORA pill in the title bar: the main screen's door to the
+                // sniffer, which until now was only reachable from SETTINGS >
+                // SYSTEM. Opens the same view that row does, so the two doors
+                // land in the same place and there is only one thing to learn.
+                //
+                // Ahead of the edge zones for the same reason as the message
+                // bubble below: it sits in the top band, and a tap meant for it
+                // must never cycle the background on the way. The picker being
+                // open does not disarm it -- the picker relabels the BOTTOM
+                // bar, and enterClear() closes it when BACK comes back here.
+                lastTouch = now;
+                sqActive  = false;
+                enterLora(LoraView::LIST, true);
+#endif
 #if SQUACH_MESH
             } else if (touchJustDown && (now - lastTouch) > TOUCH_DEBOUNCE_MS &&
                        uiClearBubbleHit(tp.x, tp.y)) {
@@ -5326,6 +5352,13 @@ void loop() {
                             Settings::cycleLoraMode();
                             Lora::setMode((Lora::Mode)Settings::loraMode());
                             break;
+                        // Each switch is its own tap, and turning the master
+                        // off leaves the two under it as they were: coming
+                        // back to ON must not silently re-enable a source
+                        // somebody had singled out and turned off.
+                        case SettingsRow::LORA_LOOKUPS: Settings::toggleLoraLookups(); break;
+                        case SettingsRow::LORA_LK_CALL: Settings::toggleLoraLookupCall(); break;
+                        case SettingsRow::LORA_LK_OGN:  Settings::toggleLoraLookupOgn(); break;
                         case SettingsRow::LORA_PROFILE: {
                             // Steps through the table; FOCUS follows at once
                             // so the change can be heard while the row is
@@ -6273,8 +6306,12 @@ void loop() {
             if (touchJustUp && gestureActive) {
                 gestureActive = false;
                 if (!gestureMoved && uiLoraTap(*canvas, gestureStartX, gestureStartY, tft.width(), tft.height()) == LoraTap::BACK) {
-                    uiSettingsOpenPage(SettingsPage::SYSTEM);
-                    enterSettings();
+                    // Back the way you came in -- see s_loraFromClear.
+                    if (s_loraFromClear) enterClear();
+                    else {
+                        uiSettingsOpenPage(SettingsPage::SYSTEM);
+                        enterSettings();
+                    }
                 }
             }
             break;

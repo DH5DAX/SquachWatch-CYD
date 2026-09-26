@@ -51,7 +51,9 @@ void     expandPsk(uint8_t psk, uint8_t out[16]);
 // Channels known, built-in first. The presets' default-key hashes are
 // LongFast 0x08, MediumFast 0x1F, ShortSlow 0x77 and so on.
 uint8_t        channelCount();
-const Channel& channel(uint8_t i);
+// A copy, not a reference -- see the note in lora_meshcore.h. Past the end
+// gives a zeroed, disabled channel.
+Channel        channel(uint8_t i);
 // The user's own; false when the table is full, the name is already held, or
 // the key does not parse.
 bool           addChannel(const char* name, const char* keyText);

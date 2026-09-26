@@ -4,6 +4,13 @@
 // from the IEEE registry by way of Wireshark's manuf file.
 #include "lora_lorawan.h"
 #include "lora_crypto.h"
+// The NetID registry, generated from the published allocation rather than
+// typed here: 143 rows against the 39 this file used to carry, at about 6 kB
+// of flash, and no network call ever -- a DevAddr names its operator offline
+// or not at all (docs/LORA.md section 8). tools/gen_netid.py says where each
+// row came from, what it refused to emit, and how it cross-checks the
+// NWKID_BITS table in lookupDevAddr() against the published prefix widths.
+#include "lora_netid_table.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -59,27 +66,8 @@ bool parse(const uint8_t* d, uint8_t len, Frame& f) {
 }
 
 // ---- who runs it -------------------------------------------------------------
-struct NetEntry { uint32_t netId; const char* op; };
-static const NetEntry REGISTRY[] = {
-    // Type 0: DevAddr 0xxxxxxx, NwkID in the six bits under the top one.
-    { 0x000000, "private / experimental" }, { 0x000001, "private / experimental" },
-    { 0x000002, "Actility" },       { 0x000003, "Proximus" },       { 0x000004, "Swisscom" },
-    { 0x000006, "EchoStar Mobile" },{ 0x000007, "Bouygues" },       { 0x000009, "Netmore" },
-    { 0x00000A, "KPN" },            { 0x00000B, "Everynet" },       { 0x00000F, "Orange" },
-    { 0x000012, "Kerlink" },        { 0x000013, "The Things Network" }, { 0x000018, "Loriot" },
-    { 0x000036, "Netze BW" },       { 0x000039, "Amazon" },         { 0x00003A, "Minol ZENNER" },
-    { 0x00003B, "Semtech" },        { 0x00003C, "Helium" },         { 0x00003E, "Unidata" },
-    { 0x00003F, "Birdz" },
-    // Type 3: DevAddr 1110....
-    { 0x600002, "Netmore" },        { 0x600010, "Senet" },          { 0x600013, "Actility" },
-    { 0x600018, "Minol ZENNER" },   { 0x60001D, "NTT" },            { 0x60001F, "KPN" },
-    { 0x60002D, "Helium" },         { 0x600030, "EchoStar Mobile" },{ 0x600032, "Orange" },
-    // Type 6: DevAddr 1111110.
-    { 0xC00018, "Minol ZENNER" },   { 0xC00019, "Telekom Srbija" }, { 0xC00028, "Lacuna Space" },
-    { 0xC0002A, "Milesight" },      { 0xC0002F, "Afnic" },          { 0xC00053, "Helium" },
-    { 0xC00058, "TTN Foundation" }, { 0xC00068, "ELSYS" },          { 0xC00074, "Swisscom" },
-};
-
+// REGISTRY[] is in the generated include/lora_netid_table.h; see the top of
+// this file.
 void lookupDevAddr(uint32_t a, NetInfo& out) {
     memset(&out, 0, sizeof out);
     out.netId = 0xFFFFFF;
@@ -109,7 +97,11 @@ static const OuiEntry OUIS[] = {
     { 9,  { 0x70, 0xB3, 0xD5, 0x7E, 0xD0 }, "TTN Foundation" },
     { 9,  { 0x70, 0xB3, 0xD5, 0x7B, 0xA0 }, "Decentlab" },
     { 9,  { 0x70, 0xB3, 0xD5, 0x71, 0xB0 }, "Elsys" },
-    { 6,  { 0x70, 0xB3, 0xD5 }, "IEEE MA-M pool (a small LoRa vendor)" },
+    // MA-S, not MA-M: oui36.csv holds 4,092 assignments under 70B3D5 across
+    // 3,324 organisations and mam.csv holds none (both counted 2026-09-26).
+    // The nine-nibble rows above are three of those 4,092; this row is the
+    // pool itself, for the other 4,089 that are not worth 85 kB of table.
+    { 6,  { 0x70, 0xB3, 0xD5 }, "IEEE MA-S pool (a small LoRa vendor)" },
     { 6,  { 0x00, 0x16, 0xC0 }, "Semtech" },
     { 6,  { 0x00, 0x08, 0x00 }, "Multitech" },
     { 6,  { 0x00, 0x80, 0x00 }, "Multitech" },

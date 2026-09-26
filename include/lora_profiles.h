@@ -24,6 +24,21 @@ uint8_t defaultProfile();
 uint32_t meshtasticSlotHz(uint32_t startHz, uint32_t endHz, uint16_t bwKhz10,
                           uint32_t spacingHz, uint32_t paddingHz, const char* name);
 
+// The duty-cycle ceiling that applies on a frequency, in per-mille of the
+// hour, or 0 when the tables below have no figure for it.
+//
+// Source: BNetzA Vfg. 91/2025 (November 2025, replacing 133/2019), the SRD
+// general licence for 868 MHz, tabulated in docs/LORA.md section 8 and
+// sourced at docs/LORA.md's Sources list:
+// https://www.bundesnetzagentur.de/DE/Fachthemen/Telekommunikation/Frequenzen/Allgemeinzuteilungen/_DL/vfg91_2025.pdf
+//
+// This is what an SRD transmitter on that frequency is allowed, which is the
+// yardstick a duty figure heard off the air has to be read against. It is one
+// number per sub-band and nothing else: the 500 mW / 10 % row that the mesh
+// band sits in is a hundred times the 0.1 % that 868.7-869.2 MHz allows, so a
+// single threshold for the whole table can only be right in one place.
+uint16_t dutyLimitPermille(uint32_t freqHz);
+
 // A short label for a frequency, "869.525", into a 10-byte buffer.
 void formatMHz(uint32_t hz, char* out, size_t cap);
 // "250k", "62.5k", "7.8k"

@@ -19,6 +19,8 @@
 #include "lora_nodes.h"
 #include "lora_meshtastic.h"
 #include "lora_channels.h"
+#include "lora_enrich.h"
+#include "lora_ident.h"
 #include "clock.h"
 #include "settings.h"
 #include <Arduino.h>
@@ -74,7 +76,25 @@ uint16_t s_cap = 0, s_head = 0, s_count = 0;
 uint32_t s_total = 0;
 uint32_t s_printed = 0;
 Stats    s_stats;
-uint32_t s_listenStart = 0;
+
+// A stopwatch over the time the receiver is actually able to hear a frame:
+// continuous RX in FOCUS, and in SURVEY the CAD window plus the reception and
+// the linger that follow a hit. It is started where the chip is put into CAD or
+// RX and closed at the top of the task loop, so every `continue` path in there
+// closes it exactly once.
+//
+// Deliberately NOT counted: the retune between survey rounds, where the chip is
+// in standby, and the whole of SWEEP, where it reads a bare RSSI and would miss
+// a frame that arrived. Without this, Stats::listenMs was declared and never
+// written and the only occupancy figure available was airtime over uptime --
+// which in SURVEY is airtime on one profile over wall-clock time spent mostly
+// on the other thirty-two, a number an order of magnitude below the truth.
+uint32_t s_listenStart = 0;     // millis() the current window began; 0 = not listening
+void listenSettle(uint32_t now) {
+    if (!s_listenStart) return;
+    s_stats.listenMs += now - s_listenStart;
+    s_listenStart = 0;
+}
 
 // How long a CAD of four symbols takes on a profile, with the retune on
 // top, so the survey's wait has a bound.
@@ -153,6 +173,9 @@ void task(void*) {
     uint32_t lastNoise = 0;
 
     for (;;) {
+        // Closes whatever listening window the last pass opened, whichever
+        // `continue` it left by.
+        listenSettle(millis());
         const Mode want = s_mode;
         if (want == Mode::OFF) {
             if (listening) { LoraRadio::standby(); listening = false; }
@@ -193,6 +216,9 @@ void task(void*) {
                 listening = LoraRadio::startReceive();
                 onMode = Mode::FOCUS; onIdx = idx; s_current = idx;
             }
+            // RX is continuous here, so the whole pass counts: reading a frame
+            // out does not take the chip off the air.
+            if (listening) s_listenStart = millis();
             if (LoraRadio::waitIrq(500)) handleIrq(idx);
             if (millis() - lastNoise > 1000) { lastNoise = millis(); noiseSample(); }
             continue;
@@ -209,6 +235,7 @@ void task(void*) {
         const uint32_t frameMs = maxFrameMs(p);
         if (!LoraRadio::startCad(4, true, frameMs)) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
         listening = true;
+        s_listenStart = millis();
         if (!LoraRadio::waitIrq(cadMs(p) + 30)) { LoraRadio::standby(); listening = false; continue; }
         uint16_t f = LoraRadio::irq();
         if (!(f & LoraRadio::IRQ_CAD_HIT)) {
@@ -248,6 +275,9 @@ void task(void*) {
 bool begin() {
     s_lock = xSemaphoreCreateMutex();
     memset(&s_stats, 0, sizeof s_stats);
+    // The request log exists before the first request can be issued, which is
+    // the point of it: an empty log is a claim the owner can check.
+    Enrich::begin();
 
     // The channel keys come back BEFORE the radio is asked anything, and they
     // come back even when the radio never answers. They belong to the
@@ -318,9 +348,36 @@ void statusLine(char* out, size_t cap) {
              modeName(s_mode), profile(s_current).name, mhz, (unsigned long)s_total);
 }
 
+// Every few seconds, and only on loop()'s task: copy the table out under one
+// lock and give the enrichment queue whatever is new. Deliberately NOT fed from
+// Nodes::note(), which runs on the radio task inside the sniffer's own mutex --
+// string work in there is time the screen spends waiting on a decoder.
+static void enrichScan(uint32_t now) {
+    static uint32_t s_lastScan = 0;
+    static uint8_t  s_page = 0;
+    // Read every pass, so a switch turned off takes effect on the next one and
+    // not at the next reboot.
+    Enrich::setSources(Settings::loraLookups(), Settings::loraLookupCall(), Settings::loraLookupOgn());
+    if (!Enrich::armed()) { s_page = 0; return; }
+    if (s_lastScan && now - s_lastScan < 5000u) return;
+    s_lastScan = now;
+    // Eight rows at a time, walking the table over successive passes: the whole
+    // of a full 96-row table inside a minute, for 960 bytes of internal RAM
+    // (a row is 120) rather than the 11.5 kB the whole table would want.
+    // Static and not on loop()'s stack, because loop() also draws a frame.
+    static Nodes::Node s_rows[8];
+    const uint8_t cap = (uint8_t)(sizeof s_rows / sizeof s_rows[0]);
+    const uint8_t n = nodeSnapshot(s_rows, cap, s_page);
+    if (n) Enrich::scan(s_rows, n, now);
+    s_page = (n < cap) ? 0 : (uint8_t)(s_page + n);
+}
+
 void tick(uint32_t now) {
-    (void)now;
     if (!s_present) return;
+    enrichScan(now);
+    // Starts a short-lived worker when there is something to ask and WiFi is
+    // already up for another reason; does nothing at all otherwise.
+    Enrich::tick(now);
     // Print what arrived since the last pass, a few per pass at most so a
     // burst never stalls a frame.
     uint8_t budget = 4;
@@ -420,12 +477,28 @@ bool nodeAt(uint8_t i, Nodes::Node& out) {
     xSemaphoreGive(s_lock);
     return n != nullptr;
 }
+uint8_t nodeSnapshot(Nodes::Node* out, uint8_t cap, uint8_t from) {
+    if (!out || !cap || !s_lock) return 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(20)) != pdTRUE) return 0;
+    // The order is 96 bytes of indices, which is cheap; the rows are what the
+    // caller pages through.
+    uint8_t idx[Nodes::CAP];
+    const uint8_t n = Nodes::order(idx, (uint8_t)Nodes::CAP);
+    uint8_t w = 0;
+    for (uint8_t i = from; i < n && w < cap; i++) {
+        const Nodes::Node* nd = Nodes::at(idx[i]);
+        if (nd) memcpy(&out[w++], nd, sizeof out[0]);
+    }
+    xSemaphoreGive(s_lock);
+    return w;
+}
 
 // ---- the channel keys ------------------------------------------------------
 // These run on loop()'s task while the radio task is decoding on the other
 // core, and there is no mutex over the channel tables. That is deliberate and
-// it is safe rather than lucky: channel(i) clamps its index against the live
-// count, so a table shrinking under a decode can never be read out of bounds.
+// it is safe rather than lucky: channel(i) returns a copy and answers a
+// past-the-end index with a zeroed, disabled channel, so a table shrinking
+// under a decode can never be read out of bounds or read half-written.
 // The worst a mute or a drop can cost is one frame that does not decrypt while
 // the entries shift -- against a mutex on the decoders' hot path, which every
 // frame would pay for. The NVS write that follows is a few milliseconds on
@@ -690,9 +763,8 @@ static bool channelConsole(const char* r) {
         // a hint, and the two-byte HMAC in front of the ciphertext decides
         // which key was right. Say it anyway, so a quiet channel is not
         // mistaken for a broken one.
-        // Copied out, not pointed at: channel(0) rebuilds Public in a static
-        // of its own on every call, so a name borrowed from it is only good
-        // until the next one.
+        // Copied out, not pointed at: channel() returns a temporary, so a
+        // name borrowed from it lives only to the end of the expression.
         char twin[24] = {0};
         for (uint8_t i = 0; i < last; i++)
             if (MeshCore::channel(i).hash == c.hash) { strncpy(twin, MeshCore::channel(i).name, sizeof twin - 1); break; }
@@ -706,6 +778,38 @@ static bool channelConsole(const char* r) {
     return true;
 }
 
+// LORA LOOKUPS: every request this board has made, and the switches that
+// decide whether it may make any. Printed by a function of its own because it
+// has to be reachable with no module in the slot -- the same reason LORA CHAN
+// is. "Nothing has been sent" is a claim the owner should be able to check on a
+// board that never had a radio to hear anything with.
+static void lookupsConsole() {
+    Serial.printf("[lora] online lookups: master %s, callsign db (%s) %s, aircraft db (%s) %s\n",
+                  Settings::loraLookups() ? "ON" : "OFF",
+                  Enrich::sourceHost(Enrich::SRC_HAM), Settings::loraLookupCall() ? "on" : "off",
+                  Enrich::sourceHost(Enrich::SRC_OGN), Settings::loraLookupOgn() ? "on" : "off");
+    Enrich::Progress pr;
+    Enrich::progress(pr, millis());
+    Serial.printf("[lora] %u queued, %u request%s sent, %u answered, %u not listed, %u no answer%s\n",
+                  (unsigned)pr.queued, (unsigned)pr.sent, pr.sent == 1 ? "" : "s",
+                  (unsigned)pr.hit, (unsigned)pr.miss, (unsigned)pr.noAnswer,
+                  pr.stalled ? ", a source is inside its rate limit" : "");
+    const uint8_t n = Enrich::logCount();
+    if (!n) {
+        Serial.println("[lora] nothing has been sent: the request log is empty");
+        return;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+        Enrich::LogRow l;
+        if (!Enrich::logAt(i, l)) break;
+        Serial.printf("[lora] %8lus ago  %-16s -> %-18s  HTTP %4d  %u bytes\n",
+                      (unsigned long)((millis() - l.ms) / 1000), l.what,
+                      Enrich::sourceHost(l.source), (int)l.code, (unsigned)l.bytes);
+    }
+    Serial.printf("[lora] %u of the last %u request%s; nothing else has left this board\n",
+                  (unsigned)n, (unsigned)Enrich::LOG_MAX, n == 1 ? "" : "s");
+}
+
 bool console(const char* line) {
     if (strncasecmp(line, "LORA", 4) != 0) return false;
     const char* a = line + 4;
@@ -715,6 +819,7 @@ bool console(const char* line) {
     // all, and the keys will be waiting when one arrives. So CHAN comes before
     // the no-module gate.
     if (strncasecmp(a, "CHAN", 4) == 0) return channelConsole(a + 4);
+    if (strcasecmp(a, "LOOKUPS") == 0) { lookupsConsole(); return true; }
     if (!s_present) { Serial.println("[lora] no module answered at boot (LORA CHAN still works: the keys are not the radio's)"); return true; }
     if (*a == '\0' || strcasecmp(a, "STATUS") == 0) {
         char s[96];
@@ -798,18 +903,60 @@ bool console(const char* line) {
             char pos[28] = "-";
             if (nd->hasPos)
                 snprintf(pos, sizeof pos, "%.4f,%.4f", nd->latE7 / 1e7, nd->lonE7 / 1e7);
-            Serial.printf("[lora] %-11s %-10s %-22s %-9s %4d dBm snr %5.2f  %3u pkt  %2u.%01u%%  %lus ago  %s %s\n",
+            // Which transmitter the signal was measured off, said out loud:
+            // "via" is the last relay's link to here, not this node's.
+            char sig[40] = "no signal of its own";
+            if (nd->directPackets)
+                snprintf(sig, sizeof sig, "%4d dBm snr %5.2f direct", (int)nd->rssi, nd->snr4 / 4.0);
+            else if (nd->viaPackets)
+                snprintf(sig, sizeof sig, "%4d dBm snr %5.2f via", (int)nd->viaRssi, nd->viaSnr4 / 4.0);
+            // The duty figure against the ceiling of the band it was heard in,
+            // and only once the hour bucket holds five minutes.
+            char dut[24];
+            if (!Nodes::dutyKnown(*nd, now))
+                snprintf(dut, sizeof dut, "duty -- <5 min");
+            else if (!nd->dutyLimit)
+                snprintf(dut, sizeof dut, "%2u.%01u%% no limit",
+                         (unsigned)(Nodes::dutyPermille(*nd, now) / 10), (unsigned)(Nodes::dutyPermille(*nd, now) % 10));
+            else
+                snprintf(dut, sizeof dut, "%2u.%01u of %u.%u%%",
+                         (unsigned)(Nodes::dutyPermille(*nd, now) / 10), (unsigned)(Nodes::dutyPermille(*nd, now) % 10),
+                         (unsigned)(nd->dutyLimit / 10), (unsigned)(nd->dutyLimit % 10));
+            // What the board works out on its own, with the radio off: a grid
+            // square for a decoded position, and a callsign with its DXCC
+            // entity. A callsign taken out of a free-text name is marked
+            // "claimed" every time it is printed, because that is what it is --
+            // a string a stranger typed, not a credential.
+            Ident::Ident id;
+            Ident::describe(*nd, id);
+            char who[56] = "";
+            if (id.callCount == 1)
+                snprintf(who, sizeof who, " %s%s%s%s", id.call[0].text,
+                         id.call[0].entity ? " " : "", id.call[0].entity ? id.call[0].entity : "",
+                         id.claimed ? " (claimed)" : "");
+            else if (id.callCount > 1)
+                // Two callsigns is an owner/operator pair, and picking one of
+                // them would invent a fact. Both, or neither.
+                snprintf(who, sizeof who, " %s + %s (claimed)", id.call[0].text, id.call[1].text);
+            char gridTxt[10] = "";
+            if (id.grid[0]) snprintf(gridTxt, sizeof gridTxt, " %s", id.grid);
+            // And what a lookup has answered, if the owner switched one on.
+            char online[64] = "";
+            Enrich::Record er;
+            if (Enrich::cached(nd->proto, nd->id, er))
+                snprintf(online, sizeof online, "  [%s %s%s%s%s%s]", Enrich::answerText(er.answer),
+                         er.what, er.where[0] ? " " : "", er.where,
+                         er.extra[0] ? " " : "", er.extra);
+            Serial.printf("[lora] %-11s %-10s %-22s %-9s %-26s %3u pkt %3u direct  %-15s  %lus ago  %s%s%s %s%s\n",
                           protoName(nd->proto), nd->tag, nd->name[0] ? nd->name : "-",
-                          Nodes::roleText(*nd), (int)nd->rssi, nd->snr4 / 4.0,
-                          (unsigned)nd->packets,
-                          (unsigned)(Nodes::dutyPermille(*nd, now) / 10),
-                          (unsigned)(Nodes::dutyPermille(*nd, now) % 10),
-                          (unsigned long)((now - nd->lastMs) / 1000), pos, flags);
+                          Nodes::roleText(*nd), sig,
+                          (unsigned)nd->packets, (unsigned)nd->directPackets, dut,
+                          (unsigned long)((now - nd->lastMs) / 1000), pos, gridTxt, who, flags, online);
         }
         Serial.printf("[lora] %u node(s)\n", (unsigned)n);
         return true;
     }
-    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | CHAN | NODES | SWEEP [kHz from to step]");
+    Serial.println("[lora] LORA | LIST | FOCUS <n> | SURVEY | SPECTRUM | OFF | ALL | MASK <hex> | HEX | TAP | CHAN | NODES | LOOKUPS | SWEEP [kHz from to step]");
     Serial.println("[lora] LORA CHAN on its own lists the keys and the rest of its words");
     return true;
 }

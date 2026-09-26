@@ -8,6 +8,11 @@
 #include "theme.h"
 #include "settings.h"
 #include "meshtalk.h"
+#if defined(CROWPANEL7)
+// For the LORA pill below. Compiled on the one board with a wireless slot,
+// the same condition SETTINGS' own LoRa rows are under (ui_settings.cpp).
+#include "lora_sniffer.h"
+#endif
 #if SQUACH_MESH
 #include "squachmesh.h"
 #include "meshtutor.h"
@@ -1734,7 +1739,13 @@ static int16_t s_wpX = 0, s_wpY = 0, s_wpW = 0, s_wpH = 0;
 // spanR: the right end of the free span. -1 keeps the old fixed reserve for
 // the rotate button and the padlock; the watch passes the corner clock's
 // left edge instead, which already sits left of both.
-static void drawWatchPill(TFT_eSPI& t, int screenW, bool watching, bool hunting, int spanR = -1) {
+// spanL: the left end, 32 -- past the gear -- by default. The CrowPanel 7
+// passes the LORA pill's right edge instead: the same arrangement as spanR,
+// one pill narrowing this one's span from the other side. The watch pill moves
+// to suit; the LoRa pill does not, because a door that wanders is a worse door
+// than one that is slightly off centre.
+static void drawWatchPill(TFT_eSPI& t, int screenW, bool watching, bool hunting,
+                          int spanR = -1, int spanL = 32) {
     // HUNT wins the label when both are set: it is the active, look-at-me mode.
     // The two are independent slots (see DetectionEngine), so both can be on.
     const char* txt = hunting ? "HUNT" : "WATCH";
@@ -1743,10 +1754,9 @@ static void drawWatchPill(TFT_eSPI& t, int screenW, bool watching, bool hunting,
     // 16 in a 20px bar: two rows of clearance top and bottom.
     const int bh = 16;
     const int bw = 16 + t.textWidth(txt) + 7;
-    // Left edge of the free span, past the gear. The right limit is the rotate
-    // icon (28) plus the lock (26) -- reserve both whether or not either is
-    // showing, so the pill cannot move when a PIN is set or rotation locked.
-    const int spanL = 32;
+    // The right limit is the rotate icon (28) plus the lock (26) -- reserve
+    // both whether or not either is showing, so the pill cannot move when a
+    // PIN is set or rotation locked. The left limit is the caller's spanL.
     if (spanR < 0) spanR = screenW - 54;
     int x = spanL + ((spanR - spanL) - bw) / 2;
     if (x < spanL) x = spanL;
@@ -2721,6 +2731,112 @@ bool uiMascotStep(uint32_t now, bool advance) {
     return true;
 }
 
+#if defined(CROWPANEL7)
+// ---- the LORA pill -----------------------------------------------------------
+// The sniffer's door from the main screen. Until this, the LORA screen had
+// exactly one way in: SETTINGS > SYSTEM, seventh row of eleven, behind
+// CALIBRATE, CHECK COLORS, DIAGNOSTICS, UPDATE FIRMWARE, UPDATE CHECK and WIFI
+// NETWORKS. This panel shows four of that page's eleven rows at a time -- 240px
+// of screen less a 32px margin and the 36px BACK strip is 170, a row is
+// fontHeight(3) + 10 = 34, and a heading takes 22 of it -- so the row was never
+// on the first screenful. The owner at the bench could not find it: "ich sehe
+// nur settings unter system, sonst nichts". He was right not to.
+//
+// WHY A PILL AND NOT A THIRD CHOICE ON THE SCAN PICKER. The picker is the
+// obvious shelf and it is the wrong one, for a reason that is in the code
+// rather than in taste: both of its slots START something. main.cpp's [BLE]
+// and [WIFI] call engine.startRawBleScan() / startRawWifiScan(), and the raw
+// scan screen owns that radio until it leaves -- which on this device means
+// the detector is not detecting while you look. LoRa is never started or
+// stopped from any screen: Lora::begin() runs once at boot and Lora::tick()
+// runs in every frame's PRE slot whatever is on the panel. A button on the
+// "which scan do you want to start" shelf would promise something it does not
+// do, next to two neighbours that really do take a radio over. And the shelf
+// is full besides: Theme::computeButtonBar() divides the bar into exactly
+// three, hitTestButtonBar() answers with exactly three ButtonIds, and the
+// third slot is the picker's only way out.
+//
+// So it goes where this screen already keeps the things that are LIVE and open
+// a screen when tapped: the WATCH/HUNT pill, the NEARBY headline, the squad
+// badge. Same 16-in-a-20px-bar shape as the watch pill, same free span in the
+// title bar's empty middle, laid out together with it just below.
+//
+// WHY THE COUNT IS NODES AND NOT FRAMES. Two reasons, and the second is the
+// one that decides it. It matches this screen's own idiom -- the counter block
+// under Squachy reads BLE:12 WIFI:34, things seen, not packets. And it keeps
+// the pill a FIXED width: the node table is 96 rows (src/lora_nodes.cpp's
+// s_nodes[96]), so two digits is the entire range, whereas a frame total
+// climbs without bound and would shove the watch pill sideways every time it
+// gained a digit.
+static bool    s_loraPillOn = false;
+static int16_t s_lpX = 0, s_lpY = 0, s_lpW = 0, s_lpH = 0;
+
+// Draws it and returns the x the WATCH pill's free span now starts at.
+static int drawLoraPill(TFT_eSPI& t, int screenW) {
+    const bool present = Lora::present();
+    // AMBER means "not listening for you right now", and it covers both an
+    // empty slot and a mode switched OFF. The screen one tap away says which,
+    // in the same colour -- ui_lora.cpp's status line draws NO MODULE in AMBER
+    // and a live profile in CYAN, so the pill and the screen agree.
+    const bool listening = present && Lora::mode() != Lora::Mode::OFF;
+    const uint16_t accent = listening ? Theme::CYAN : Theme::AMBER;
+
+    char txt[12];
+    // %2u, and "--" when there is no module to count with: both are two
+    // columns, so the pill's contents never change its width.
+    if (present) snprintf(txt, sizeof txt, "LORA %2u", (unsigned)Lora::nodeCount());
+    else         snprintf(txt, sizeof txt, "LORA --");
+
+    t.setTextSize(1);
+    const int bh = 16;                 // 16 in a 20px bar, like the watch pill
+    // Measured off the widest string it can ever print rather than off this
+    // frame's, for the reason in the header comment above.
+    const int bw = 16 + t.textWidth("LORA 00") + 7;
+
+    // Past the gear's TOUCH TARGET, not past the gear's picture. The icon is
+    // 28px wide, but Theme::settingsButtonHit() answers a 55x50 rect and
+    // main.cpp tests that before this screen sees the tap at all -- a pill at
+    // the free span's old left edge of 32 would have had a third of itself
+    // swallowed by SETTINGS. Walked rather than copied, so a later change to
+    // that rect cannot quietly eat the door. (y = 0 is inside it at any x.)
+    int x = 32;
+    while (x < screenW / 3 && Theme::settingsButtonHit(x, 0)) x++;
+    x += 4;                            // a little air between the two targets
+
+    const int y = (20 - bh) / 2;
+    t.fillRoundRect(x, y, bw, bh, 4, Theme::BG);
+    t.drawRoundRect(x, y, bw, bh, 4, accent);
+    // An antenna, the way the watch pill has an eye: one glyph that says which
+    // feature this is without spending a word on it. A mast on a base, with
+    // two radiating ticks once a frame has actually been read -- so the icon
+    // itself distinguishes "the radio is up" from "the radio has heard
+    // something", which the count alone cannot (a frame on an unknown protocol
+    // makes no node row).
+    const int mx = x + 9;
+    t.drawFastVLine(mx, y + 4, bh - 8, accent);
+    t.drawFastHLine(mx - 3, y + bh - 4, 7, accent);
+    if (Lora::packetTotal()) {
+        t.drawLine(mx - 4, y + 3, mx - 2, y + 5, accent);
+        t.drawLine(mx + 4, y + 3, mx + 2, y + 5, accent);
+    }
+    t.setTextColor(accent, Theme::BG);
+    t.setCursor(x + 16, y + (bh - 8) / 2);
+    t.print(txt);
+
+    // A finger-sized target: the bar is only 20px tall, so grow downward --
+    // the watch pill's rule, and the same numbers, so the two feel alike.
+    s_lpX = (int16_t)(x - 4); s_lpY = (int16_t)0;
+    s_lpW = (int16_t)(bw + 8); s_lpH = (int16_t)(bh + 14);
+    s_loraPillOn = true;
+    return x + bw + 8;
+}
+
+bool uiClearLoraPillHit(int x, int y) {
+    return s_loraPillOn &&
+           x >= s_lpX && x < s_lpX + s_lpW && y >= s_lpY && y < s_lpY + s_lpH;
+}
+#endif
+
 void uiClearTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool advance, bool scanMenu) {
     int w = t.width();
     int h = t.height();
@@ -2976,21 +3092,30 @@ void uiClearTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adv
     // Title bar at the top
     if (DrawBand::has(0, titleBottom)) Theme::drawTitleBar(t, ">> SQUACHWATCH <<  SCANNING");
 
-    // The watch/hunt indicator, in the title bar's empty middle. AFTER the bar
-    // itself, which repaints that whole band -- see drawWatchPill()'s comment
-    // for why the first attempt at this was invisible. Drawn in every mode,
-    // whenever either target is set.
+    // The title bar's empty middle: the LORA door, then the watch/hunt
+    // indicator. AFTER the bar itself, which repaints that whole band -- see
+    // drawWatchPill()'s comment for why the first attempt at this was
+    // invisible. Both drawn in every mode, the watch pill whenever either
+    // target is set and the LoRa pill always.
     {
         const bool watching = eng.watchKind() != DetectionEngine::WatchKind::NONE;
         const bool hunting  = eng.huntKind()  != DetectionEngine::WatchKind::NONE;
-        // The flag goes inside the guard with the drawing it describes. Left
+        // The flags go inside the guard with the drawing they describe. Left
         // outside it, the pass that cannot reach the title bar would clear a
         // pill the other pass had just drawn, and it would stop being tappable.
         if (DrawBand::has(0, titleBottom)) {
             s_watchPillOn = false;
-            // Right of the pill: the watch's corner clock, drawn earlier (see
-            // drawCornerClock()); -1 elsewhere, the old fixed reserve.
-            if (watching || hunting) drawWatchPill(t, w, watching, hunting, s_cornerClockPillR);
+            // The LoRa door is anchored at the left of the span and hands the
+            // watch pill whatever is left of it -- the mirror of what the
+            // T-Watch's corner clock does from the right.
+            int spanL = 32;
+#if defined(CROWPANEL7)
+            s_loraPillOn = false;
+            spanL = drawLoraPill(t, w);
+#endif
+            // Right of the watch pill: the watch's corner clock, drawn earlier
+            // (see drawCornerClock()); -1 elsewhere, the old fixed reserve.
+            if (watching || hunting) drawWatchPill(t, w, watching, hunting, s_cornerClockPillR, spanL);
         }
     }
 

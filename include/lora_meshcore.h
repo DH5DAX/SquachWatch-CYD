@@ -72,7 +72,10 @@ void    hashtagKey(const char* nameWithHash, uint8_t key[16]);
 uint8_t channelHash(const uint8_t key[16]);
 // The Public channel is built in; the user may add hashtags and keys.
 uint8_t        channelCount();
-const Channel& channel(uint8_t i);
+// A copy, not a reference: the screens read this from loop() while the radio
+// task decodes on the other core, and a shared buffer between them is a race
+// nobody needs. Past the end gives a zeroed, disabled channel.
+Channel        channel(uint8_t i);
 bool           addChannel(const char* name, const char* keyTextOrNull);   // no key: derived from "#name"
 void           clearUserChannels();
 // How many of the list are the user's, and how many there is room for. The

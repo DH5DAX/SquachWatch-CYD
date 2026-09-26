@@ -1190,10 +1190,39 @@ What follows for the defaults:
   area, so keep it local and aggregated.
 - **Payloads only with keys the user enters:** keys to their own devices and
   networks, entered by hand. The firmware does no key guessing of any kind.
-- **Nothing goes out:** no upload, no sharing of third-party content, and
-  exports only at the user's hand.
+- **What goes out, and what never does.** This line used to read *"Nothing
+  goes out: no upload, no sharing of third-party content, and exports only at
+  the user's hand"*, and it forbade more than it meant to: an online lookup of
+  a callsign that was transmitted in the clear is not "sharing content", and
+  the owner has asked for exactly that. It is now three things, which the old
+  line ran together:
+  1. **Content — never, in either direction.** Payloads, message text, channel
+     traffic, keys. No upload, no sharing, exports only at the user's hand.
+     Unchanged.
+  2. **Identifiers already broadcast in the clear** — a callsign, a FANET
+     address, a public key. These may leave, and only like this: on an explicit
+     per-source opt-in that names the host, only for a node this board heard
+     itself, read back through an allow-list of a few fields, and logged where
+     the owner can read the log. All three switches default OFF. The
+     implementation and the reasoning are `include/lora_enrich.h`; the first
+     two sources are a callsign lookup for LoRa APRS and MeshCom, where the
+     callsign is legally required station identification, and the OGN device
+     database for FANET.
+  3. **The device's own position, and the user's own data — never.** There is
+     nothing on this board that knows where it is, and this feature must not
+     become the reason to acquire it: the MeshCore area query that would want a
+     bounding box is keyed on a heard public key instead.
+  **A callsign extracted from a free-text Meshtastic or MeshCore name is NOT in
+  category 2 and is never sent anywhere.** It is a string a stranger typed, and
+  the chain from it is measured rather than imagined: one advert name heard at
+  this bench yielded a token that resolved, in one keyless GET, to a named
+  private individual at a street address. The offline tables give such a name a
+  country and a grid square and stop there, marked *claimed*.
 - **Positions of people** (Meshtastic, APRS) are personal data. Private use is
-  outside the GDPR's scope, but publishing them is not.
+  outside the GDPR's scope, but publishing them is not. This is why a
+  licensee's registered address is never plotted or shown: the bench's own
+  repeater advertises `JO41bi` while its licensee is registered in `JO41ak`, so
+  substituting the second for the first moves a repeater to somebody's house.
 
 **Transmitting on the amateur bands: AFuV.**
 
@@ -1248,8 +1277,17 @@ The amateur licence adds nothing there. The limits are:
 - **Decoders, one file each:** Meshtastic, MeshCore, LoRaWAN, APRS, MeshCom,
   FANET, and later the FSK ones. Each exposes the same three calls: "is this
   mine?", "decode", and "which node is it?".
-- **Tables in flash:** the NetID registry subset, a LoRa-relevant OUI subset,
-  and the Meshtastic preset and channel-hash table.
+- **Tables in flash:** the NetID registry (now all 143 assigned rows, generated
+  by `tools/gen_netid.py`, about 6 kB), a LoRa-relevant OUI subset, the
+  Meshtastic preset and channel-hash table, and the DXCC prefix table
+  (`tools/gen_dxcc.py` from `cty.dat`, MIT, 324 entities and 1,937 prefixes,
+  about 21 kB).
+- **`lora_ident`:** the offline half of node enrichment -- a Maidenhead locator
+  from any decoded position, a callsign out of a free-text name, and the DXCC
+  entity behind a prefix. Pure, host-tested, no network.
+- **`lora_enrich`:** the online half -- the queue, the per-source rate limits,
+  the negative cache, the request log and the two response parsers. Everything
+  but the socket is host-tested.
 - **Storage:** a capture partition in the unused 7.4 MB of flash, written in
   batches.
 
@@ -1288,10 +1326,12 @@ DEX cards for the protocol types, and alerts only for `LORA_TRACKER`.
 ## 10. Measure first
 
 Eleven questions as they were written on 2026-09-26, before any of this met
-the board. The bench session that afternoon answered four of them (1, 2, 4 and
-11), showed one to be the wrong question (3), half-answered one (8) and turned
-one into a defect to fix first (7). The other four are untouched, and an item
-that still says open is still open.
+the board, and a twelfth added that evening when the online lookups were
+designed. The bench session that afternoon answered four of the eleven (1, 2, 4
+and 11), showed one to be the wrong question (3), half-answered one (8) and
+turned one into a defect to fix first (7); the twelfth was answered without the
+board at all, by reading the framework. The other four are untouched, and an
+item that still says open is still open.
 
 1. **K1 on this board:** which switch is S0 and which is S1, and which way is
    ON. **Answered:** the wireless position is **S1 = 0, S0 = 1**, which is
@@ -1350,6 +1390,42 @@ that still says open is still open.
     been measured.
 11. **The build:** does RadioLib 7.7.1 build and run on arduino-esp32 2.0.14?
     **Answered: yes**, both.
+12. **Does a TLS handshake fit on this board, with the screen up?** Added when
+    the online lookups were designed, because the two best node registries
+    (`map.meshcore.io`, `meshtastic.liamcottle.net`) are HTTPS-only and
+    `src/ota_wifi.cpp` had abandoned TLS on a remembered figure rather than a
+    measured one. **Answered off the board, and mostly answered — run
+    `sh tools/tls_fit_probe.sh` to reproduce every number.**
+    - **How much, and in what pieces.** Read out of a compiled object, not
+      estimated: in buffer **16,717 B**, out buffer **16,717 B**, handshake
+      state 2,280 B, session and config 776 B — **36,490 B**, plus the peer
+      certificate chain. So the largest *single* allocation is **16.3 kB**, not
+      the 40 kB `src/ota_wifi.cpp` remembered, and a 34 kB or 57 kB largest free
+      block would take it. The old comment had the total right and the shape
+      wrong.
+    - **From which heap — and this is the part that decides it.** All of it is
+      internal. `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y` makes
+      `MBEDTLS_PLATFORM_STD_CALLOC` `esp_mbedtls_mem_calloc`, and the shipped
+      `libmbedcrypto.a` has the capability mask **0x804**
+      (`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`) compiled into its call to
+      `heap_caps_calloc`. So `CONFIG_SPIRAM_USE_MALLOC=y` — the hope that large
+      allocations would land in PSRAM anyway — **cannot serve a single byte of
+      it**, because mbedTLS never calls `malloc`. That was the open question and
+      it is closed, negatively.
+    - **And the buffers cannot be shrunk here.** mbedTLS arrives prebuilt in
+      this framework, so its sdkconfig is fixed: 16,384 bytes of content length
+      with `CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN` off and
+      `CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH` off. A `-D` in
+      `platformio.ini` changes nothing in an object that is already compiled.
+    - **What is left for the bench.** Whether ~40 kB of internal heap, in two
+      16.3 kB pieces, is *free* at the moment a lookup wants it — with the
+      frame buffer, both radios and the sniffer already in there, out of about
+      80 kB free in total. Not answerable off the board, and not worth
+      answering until something needs it: on this arithmetic a handshake takes
+      half the internal heap for the duration of one request, to fetch a
+      registry row about a station that just broadcast its own identity in the
+      clear. **The first version uses plain HTTP only, and the MeshCore
+      registry waits for a proxy.**
 
 ---
 

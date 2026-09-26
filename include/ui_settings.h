@@ -70,6 +70,15 @@ enum class SettingsRow : uint8_t {
     LORA_MODE,       // ...and the slot's mode: OFF, FOCUS, SURVEY
     LORA_PROFILE,    // ...and which profile FOCUS parks on
     LORA_CHANNELS,   // ...and the keys it holds: opens the LORA screen on CHANS
+    // The online lookups, all OFF until somebody here says otherwise. Three
+    // rows and not one: the master says whether anything may leave the board,
+    // and the two under it say WHICH third party may be told about a node this
+    // board heard. Only ever shown on the board with the radio, and the row
+    // values name the hosts, because a switch that does not say where the
+    // bytes go is not consent (include/lora_enrich.h).
+    LORA_LOOKUPS,
+    LORA_LK_CALL,
+    LORA_LK_OGN,
 #endif
     BOARD_BATTERY,   // the Freenove S3 only: the cell's voltage, on the SYSTEM page
     BACK,

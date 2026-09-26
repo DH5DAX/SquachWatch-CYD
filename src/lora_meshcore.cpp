@@ -124,9 +124,9 @@ static const uint8_t MAX_USER = 24;
 static Channel s_user[MAX_USER];
 static uint8_t s_nUser = 0;
 // Index-for-index with channel(): slot 0 is Public, the rest the user's. A
-// parallel array rather than two fields in Channel, because channel(0)
-// rebuilds Public from the constant above on every call and a counter living
-// in that struct would be reset by its own getter.
+// parallel array rather than two fields in Channel, because channel(0) builds
+// Public from the constant above on every call and a counter living in that
+// struct would be reset by its own getter.
 static uint32_t s_frames[1 + MAX_USER];
 static uint32_t s_lastMs[1 + MAX_USER];
 
@@ -134,19 +134,31 @@ uint8_t channelCount() { return (uint8_t)(1 + s_nUser); }
 uint8_t userChannelCount() { return s_nUser; }
 uint8_t maxUserChannels() { return MAX_USER; }
 
-const Channel& channel(uint8_t i) {
-    static Channel pub;
+// By value, and it matters. Public used to be built into one file-static and
+// handed back by reference, so every caller shared one struct: the CHANS view
+// asks for a row about thirty times a second from loop() while the radio task
+// may be inside decode() holding what it thinks is its own copy. Nothing there
+// could run off the end -- both decode sites copy immediately, and the cost of
+// losing the race was a torn Channel and one frame that failed to decrypt --
+// but a shared mutable buffer across two cores is not something to leave
+// standing on the strength of its worst case. A Channel is 44 bytes; a copy is
+// cheaper than the SHA-256 the caller is about to do with it.
+Channel channel(uint8_t i) {
+    Channel c;
+    memset(&c, 0, sizeof c);
     if (i == 0) {
-        memset(&pub, 0, sizeof pub);
-        strncpy(pub.name, "Public", sizeof pub.name - 1);
-        memcpy(pub.key, PUBLIC_KEY, 16);
-        pub.hash = 0x11;
-        pub.derived = false;      // a published constant, not a derivation
-        pub.enabled = true;       // built in, and never switched off
-        return pub;
+        strncpy(c.name, "Public", sizeof c.name - 1);
+        memcpy(c.key, PUBLIC_KEY, 16);
+        c.hash = 0x11;
+        c.derived = false;      // a published constant, not a derivation
+        c.enabled = true;       // built in, and never switched off
+        return c;
     }
     i--;
-    return s_user[i < s_nUser ? i : 0];
+    // Past the end -- a list that shrank under a caller holding an old index --
+    // gives a zeroed channel, which is disabled and can open nothing.
+    if (i < s_nUser) return s_user[i];
+    return c;
 }
 
 bool addChannel(const char* name, const char* keyText) {

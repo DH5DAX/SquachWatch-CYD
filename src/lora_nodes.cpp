@@ -5,13 +5,13 @@
 #include "lora_lorawan.h"
 #include "lora_aprs.h"
 #include "lora_fanet.h"
+#include "lora_profiles.h"
 #include <stdio.h>
 #include <string.h>
 
 namespace Lora {
 namespace Nodes {
 
-static const uint8_t CAP = 96;
 static Node    s_nodes[CAP];
 static uint8_t s_n = 0;
 
@@ -36,18 +36,37 @@ static Node* get(Proto p, uint64_t id, uint32_t now) {
     }
     memset(n, 0, sizeof *n);
     n->proto = p; n->id = id; n->firstMs = now; n->hourStartMs = now;
-    n->rssi = -200;
+    n->rssi = -200; n->viaRssi = -200;
     return n;
 }
 
-static void heard(Node& n, const Packet& pk, uint32_t now) {
+// Five minutes of a bucket before the ratio in it is worth anything. The
+// figure was already the guard on the flag; dutyKnown() is it with a name, so
+// the screen and the console can ask the same question the flag asks.
+static const uint32_t DUTY_MIN_WINDOW_MS = 300000u;
+
+static void heard(Node& n, const Packet& pk, uint32_t now, Link link) {
     n.lastMs = now;
-    n.rssi = pk.rssi; n.snr4 = pk.snr4;
     n.packets++;
-    n.airtimeMs += pk.toaUs / 1000;
     if (now - n.hourStartMs >= 3600000u) { n.hourStartMs = now; n.hourAirMs = 0; }
-    n.hourAirMs += pk.toaUs / 1000;
-    if (dutyPermille(n, now) > 100 && now - n.hourStartMs > 300000u) n.flags |= NF_DUTY; else n.flags &= (uint8_t)~NF_DUTY;
+    if (link == LINK_DIRECT) {
+        n.rssi = pk.rssi; n.snr4 = pk.snr4;
+        n.directPackets++;
+        // Only what this node transmitted itself: see Node::airtimeMs.
+        n.airtimeMs += pk.toaUs / 1000;
+        n.hourAirMs += pk.toaUs / 1000;
+        // The band it transmits in decides what it is allowed. Taken from the
+        // last direct frame, which is the whole answer for a node that lives on
+        // one profile and a coarse one for a node whose operator changed preset
+        // mid-hour; a relayed copy says which band the RELAY used, so it must
+        // not set this.
+        n.dutyLimit = dutyLimitPermille(pk.freqHz);
+    } else {
+        n.viaRssi = pk.rssi; n.viaSnr4 = pk.snr4;
+        n.viaPackets++;
+    }
+    if (n.dutyLimit && dutyKnown(n, now) && dutyPermille(n, now) > n.dutyLimit) n.flags |= NF_DUTY;
+    else                                                                        n.flags &= (uint8_t)~NF_DUTY;
 }
 
 uint16_t dutyPermille(const Node& n, uint32_t now) {
@@ -55,6 +74,8 @@ uint16_t dutyPermille(const Node& n, uint32_t now) {
     if (span < 1000) return 0;
     return (uint16_t)(((uint64_t)n.hourAirMs * 1000ull) / span);
 }
+
+bool dutyKnown(const Node& n, uint32_t now) { return now - n.hourStartMs > DUTY_MIN_WINDOW_MS; }
 
 static void noteMeshtastic(const Packet& pk, uint32_t now) {
     Meshtastic::Decoded d;
@@ -66,9 +87,15 @@ static void noteMeshtastic(const Packet& pk, uint32_t now) {
     if (d.haveData) Meshtastic::noteChannelHeard(d.channelIdx, now);
     Node& n = *get(Proto::MESHTASTIC, d.hdr.from, now);
     if (!n.tag[0]) Meshtastic::nodeId(d.hdr.from, n.tag);
-    heard(n, pk, now);
+    // hopsAway is hop_start - hop_limit, and 0xFF when hop_start is 0 -- a
+    // firmware before 2.3, which gives no way to tell a relayed copy from a
+    // first-hand one. Zero hops consumed is the only direct evidence there is;
+    // relayNode would be a second test but it is one byte of a node number, so
+    // one node in 256 aliases with the sender and it cannot stand alone.
+    const uint8_t away = Meshtastic::hopsAway(d.hdr);
+    heard(n, pk, now, away == 0 ? LINK_DIRECT : LINK_VIA);
     n.hopLimit = d.hdr.hopLimit;
-    n.hops = Meshtastic::hopsAway(d.hdr);
+    n.hops = away;
     if (d.hdr.hopLimit > 3 || d.hdr.hopStart > 3) n.flags |= NF_HOPS_HIGH;
     if (d.hdr.viaMqtt) n.flags |= NF_MQTT;
     if (!d.hdr.hopStart || !d.hdr.relayNode) n.flags |= NF_OLD_FW;
@@ -107,7 +134,14 @@ static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
         uint64_t id = 0;
         for (int i = 0; i < 8; i++) id = (id << 8) | d.adv.pubkey[i];
         Node& n = *get(Proto::MESHCORE, id, now);
-        heard(n, pk, now);
+        // An advert that crossed repeaters was last transmitted by one of
+        // them, so its signal belongs to the relay and not to the advertiser:
+        // the bench saw eleven-hop paths routinely (docs/LORA.md section 1).
+        // On a flood the path is the hops already taken, so hops == 0 is
+        // first-hand; on the other routes the path is the hops still to come
+        // and the count says nothing about who transmitted this copy.
+        const bool flood = f.route == MeshCore::ROUTE_FLOOD || f.route == MeshCore::ROUTE_TRANSPORT_FLOOD;
+        heard(n, pk, now, (flood && f.hops == 0) ? LINK_DIRECT : LINK_VIA);
         snprintf(n.tag, sizeof n.tag, "%02x%02x%02x", d.adv.pubkey[0], d.adv.pubkey[1], d.adv.pubkey[2]);
         if (d.adv.hasName) strncpy(n.name, d.adv.name, sizeof n.name - 1);
         n.role = d.adv.nodeType;
@@ -131,7 +165,9 @@ static void noteMeshCore(const Packet& pk, uint32_t now, uint32_t epoch) {
             n = get(Proto::MESHCORE, 0x0100000000000000ull | h, now);
             if (!n->tag[0]) snprintf(n->tag, sizeof n->tag, "rpt %02x", h);
         }
-        heard(*n, pk, now);
+        // This row IS the station whose transmission we just received, so the
+        // signal is a measured link to it even though the frame is relayed.
+        heard(*n, pk, now, LINK_DIRECT);
         n->hops = f.hops;
     }
 }
@@ -144,7 +180,7 @@ static void noteLoRaWAN(const Packet& pk, uint32_t now) {
         uint64_t id = 0;
         for (int i = 0; i < 8; i++) id = (id << 8) | f.devEui[i];
         Node& n = *get(Proto::LORAWAN, id, now);
-        heard(n, pk, now);
+        heard(n, pk, now, LINK_DIRECT);
         snprintf(n.tag, sizeof n.tag, "%02x%02x..%02x%02x", f.devEui[0], f.devEui[1], f.devEui[6], f.devEui[7]);
         strncpy(n.name, d.maker ? d.maker : "join request", sizeof n.name - 1);
         n.role = 1;
@@ -155,7 +191,11 @@ static void noteLoRaWAN(const Packet& pk, uint32_t now) {
     if (f.mtype == LoRaWAN::JOIN_ACCEPT || f.mtype == LoRaWAN::PROPRIETARY) return;
     Node& n = *get(Proto::LORAWAN, f.devAddr, now);
     const bool fresh = n.packets == 0;
-    heard(n, pk, now);
+    // A class A uplink reaches its gateway in one hop and a downlink comes
+    // from one, so what we heard is the device's own transmitter. TS011 relays
+    // are the exception and the profile exists (src/lora_profiles.cpp), but
+    // whether any are deployed within range is unverified.
+    heard(n, pk, now, LINK_DIRECT);
     snprintf(n.tag, sizeof n.tag, "%08lx", (unsigned long)f.devAddr);
     if (d.net.op) strncpy(n.name, d.net.op, sizeof n.name - 1);
     n.role = f.uplink ? 0 : 2;
@@ -180,7 +220,10 @@ static void noteAprs(const Packet& pk, uint32_t now) {
     Aprs::Frame f;
     if (!Aprs::parse(pk.data, pk.len, f)) return;
     Node& n = *get(Proto::APRS, textId(f.src), now);
-    heard(n, pk, now);
+    // A digipeater marks its entry in the path with '*', so an unmarked path
+    // is the originator's own transmission. A digipeater that does not set the
+    // flag is invisible to this test and its copy counts as direct.
+    heard(n, pk, now, f.digipeated == 0 ? LINK_DIRECT : LINK_VIA);
     strncpy(n.tag, f.src, sizeof n.tag - 1);
     if (f.info.hasPos) { n.hasPos = true; n.latE7 = f.info.latE7; n.lonE7 = f.info.lonE7; }
     n.hops = f.digipeated;
@@ -191,7 +234,10 @@ static void noteMeshCom(const Packet& pk, uint32_t now) {
     MeshCom::Frame f;
     if (!MeshCom::parse(pk.data, pk.len, f) || f.type == 'A') return;
     Node& n = *get(Proto::MESHCOM, textId(f.src), now);
-    heard(n, pk, now);
+    // Relays append their call only with the track bit set (include/lora_aprs.h).
+    // So an empty path proves first-hand reception when track is set, and
+    // proves nothing at all when it is clear.
+    heard(n, pk, now, (f.track && !f.path[0]) ? LINK_DIRECT : LINK_VIA);
     strncpy(n.tag, f.src, sizeof n.tag - 1);
     const char* hw = MeshCom::hwName(f.hwId);
     if (hw) snprintf(n.name, sizeof n.name, "%s fw%u", hw, (unsigned)f.fwVersion);
@@ -205,7 +251,12 @@ static void noteFanet(const Packet& pk, uint32_t now) {
     Fanet::Frame f;
     if (!Fanet::parse(pk.data, pk.len, f)) return;
     Node& n = *get(Proto::FANET, ((uint64_t)f.manufacturer << 16) | f.id, now);
-    heard(n, pk, now);
+    // FANET carries no path and no hop count: `forward` says the sender wants
+    // a relay, not that this copy is one (include/lora_fanet.h). Counted as
+    // direct because that is what the frame says and because a tracking frame
+    // is normally heard straight off the aircraft; a forwarded copy would be
+    // miscredited, and the fix for that is duplicate detection, not a guess.
+    heard(n, pk, now, LINK_DIRECT);
     Fanet::addressText(f.manufacturer, f.id, n.tag);
     if (f.type == Fanet::T_NAME && f.text[0]) strncpy(n.name, f.text, sizeof n.name - 1);
     else if (!n.name[0]) { const char* m = Fanet::manufacturerName(f.manufacturer); if (m) strncpy(n.name, m, sizeof n.name - 1); }

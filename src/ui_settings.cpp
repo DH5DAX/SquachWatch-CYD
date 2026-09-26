@@ -36,7 +36,9 @@ static int g_scrollFor[5] = { 0, 0, 0, 0, 0 };
 
 // Which groups are folded shut. Session-only on purpose: a fold is a "get this
 // out of my way for a minute", not a preference worth surviving a reboot.
-static bool s_folded[7] = { false, false, false, false, false, false, false };
+// One entry per RowGroupId, which is what GROUP_N counts.
+static const uint8_t GROUP_N = 9;
+static bool s_folded[GROUP_N] = {};
 
 // Whether a watch/hunt target exists. Set every tick from the engine, read by
 // buildDisplayList() -- which has no engine of its own, and is called by the
@@ -135,18 +137,42 @@ static const uint8_t WATCH_ROWS_N = sizeof(WATCH_ROWS) / sizeof(WATCH_ROWS[0]);
 #endif
 
 // The SYSTEM page: the rarely-needed machinery, off the main list.
+//
+// RESET STATS used to be the LAST row, directly under the four LoRa ones, and
+// that is how the owner wiped the frame counters while hunting for the LoRa UI:
+// this page shows four of its eleven rows at a time, so finding the LoRa block
+// means scrolling to the very bottom, and the very bottom is where the one row
+// on the page that throws a number away was sitting.
+//
+// It is not last any more, and it is not next to them either: it has a COUNTERS
+// heading above it and the LORA heading below it (see groupFor()), so a 22px
+// header row of air sits on each side of it. The LoRa rows take the end of the
+// list instead -- which is where a finger that scrolled to the bottom looking
+// for them wanted to be all along, and now the row below them is nothing.
+//
+// Off this board RESET STATS keeps exactly the position it has today: the LoRa
+// block is not compiled, so the row order is unchanged and the only difference
+// is the heading.
 static const SettingsRow SYSTEM_ROWS[] = {
 #if defined(FREENOVE_S3)
     SettingsRow::BOARD_BATTERY,
 #endif
     SettingsRow::CALIBRATE, SettingsRow::CHECK_COLORS,
     SettingsRow::DIAGNOSTICS, SettingsRow::UPDATE_FIRMWARE, SettingsRow::UPDATE_CHECK, SettingsRow::WIFI_NETWORKS,
+    SettingsRow::RESET_STATS,
 #if defined(CROWPANEL7)
     // The wireless slot, on the one board that has it: the screen, the
-    // mode, and the profile FOCUS parks on.
+    // mode, and the profile FOCUS parks on. Under their own LORA heading now,
+    // so the page names them instead of burying four radio rows in SYSTEM.
+    // They all stay: the main screen's LORA pill (ui_clear.cpp) is the door
+    // people will actually use to reach the screen, but LORA MODE and LORA
+    // PROFILE are settings and settings belong on a settings page.
     SettingsRow::LORA, SettingsRow::LORA_MODE, SettingsRow::LORA_PROFILE, SettingsRow::LORA_CHANNELS,
+    // And, last of all, the three that decide whether anything about a node
+    // leaves this board. Last because they are the rarest thing anybody
+    // changes and because the master reads as the heading of the two under it.
+    SettingsRow::LORA_LOOKUPS, SettingsRow::LORA_LK_CALL, SettingsRow::LORA_LK_OGN,
 #endif
-    SettingsRow::RESET_STATS,
 };
 static const uint8_t SYSTEM_ROWS_N = sizeof(SYSTEM_ROWS) / sizeof(SYSTEM_ROWS[0]);
 
@@ -197,9 +223,35 @@ static bool isSquachyOnlyRow(SettingsRow r) {
            r == SettingsRow::PET || r == SettingsRow::TOP_HAT;
 }
 
-enum class RowGroupId : uint8_t { APPEARANCE, BEHAVIOR, SQUACHY, SYSTEM, DESK, SQUAD, WATCH };
+// Appended, never reordered: s_folded is indexed by these and GROUP_N above
+// counts them.
+enum class RowGroupId : uint8_t { APPEARANCE, BEHAVIOR, SQUACHY, SYSTEM, DESK, SQUAD, WATCH,
+                                  LORA, COUNTERS };
+static_assert((uint8_t)RowGroupId::COUNTERS + 1 == GROUP_N,
+              "s_folded has one entry per RowGroupId");
 
 static RowGroupId groupFor(SettingsRow r) {
+    // The four LoRa rows get a heading of their own, and RESET STATS gets one,
+    // for the same reason: the SYSTEM page ran fourteen items long with one
+    // heading over the lot, and the two things on it worth finding -- the
+    // radio, and the row that zeroes every count -- were indistinguishable
+    // rows in the middle of it. A heading names the first and fences the
+    // second. See SYSTEM_ROWS.
+    switch (r) {
+#if defined(CROWPANEL7)
+        case SettingsRow::LORA:
+        case SettingsRow::LORA_MODE:
+        case SettingsRow::LORA_PROFILE:
+        case SettingsRow::LORA_CHANNELS:
+        case SettingsRow::LORA_LOOKUPS:
+        case SettingsRow::LORA_LK_CALL:
+        case SettingsRow::LORA_LK_OGN:
+            return RowGroupId::LORA;
+#endif
+        case SettingsRow::RESET_STATS:
+            return RowGroupId::COUNTERS;
+        default: break;
+    }
     // Appearance sits with the Squachy rows because that is where it was asked
     // for and where a thumb opening this screen will not hit it by accident.
     // Boring mode filters every OTHER row in that group, though, and a lone
@@ -269,7 +321,7 @@ static RowGroupId groupFor(SettingsRow r) {
         case SettingsRow::DESK_MODE:
         case SettingsRow::SHOW_OFF:
             return RowGroupId::SQUACHY;
-        default:  // CALIBRATE, CHECK_COLORS, DIAGNOSTICS, RESET_STATS, BACK
+        default:  // CALIBRATE, CHECK_COLORS, DIAGNOSTICS, BACK
             return RowGroupId::SYSTEM;
     }
 }
@@ -282,6 +334,12 @@ static const char* groupName(RowGroupId g) {
         case RowGroupId::DESK:       return "DESK";
         case RowGroupId::SQUAD:      return "SQUAD";
         case RowGroupId::WATCH:      return "WATCH";
+        case RowGroupId::LORA:       return "LORA";
+        // Not "DANGER": the row under it says RESET STATS and asks before it
+        // does anything. What the heading is for is telling you, while you are
+        // still scrolling, that you have left the machinery rows and arrived at
+        // the one that throws a number away.
+        case RowGroupId::COUNTERS:   return "COUNTERS";
         default:                     return "SYSTEM";
     }
 }
@@ -297,6 +355,13 @@ static uint16_t groupColor(RowGroupId g) {
         case RowGroupId::DESK:       return Theme::CYAN;
         case RowGroupId::SQUAD:      return Theme::GREEN;
         case RowGroupId::WATCH:      return Theme::AMBER;
+        // VAPOR_BLUE is the one palette entry no other group had taken, and
+        // this page is purple, so the radio block reads as a block.
+        case RowGroupId::LORA:       return Theme::VAPOR_BLUE;
+        // The row below it already draws in the danger colour (rowContent()
+        // sets danger on RESET STATS); the heading matching it is what makes
+        // the pair legible as one thing at a glance.
+        case RowGroupId::COUNTERS:   return Theme::RED;
         default:                     return Theme::VAPOR_PURPLE;
     }
 }
@@ -461,8 +526,11 @@ void uiSettingsInit(TFT_eSPI& t) {
     // visit -- carrying it across a fresh entry would drop you mid-list with
     // no idea why.
     s_page = SettingsPage::MAIN;
-    for (uint8_t i = 0; i < 5; i++) g_scrollFor[i] = 0;
-    for (uint8_t i = 0; i < 7; i++) s_folded[i] = false;
+    // Sized from the arrays, not written as numbers: one side of a merge had
+    // five pages and seven groups, the other four and GROUP_N, and a literal
+    // that is short by two leaves two groups folded across a fresh entry.
+    for (uint8_t i = 0; i < sizeof(g_scrollFor) / sizeof(g_scrollFor[0]); i++) g_scrollFor[i] = 0;
+    for (uint8_t i = 0; i < GROUP_N; i++) s_folded[i] = false;
     // Any pending question dies with the screen. Coming back to Settings and
     // finding a confirm panel still up from last time would be answering
     // something you no longer remember asking.
@@ -953,6 +1021,21 @@ static void rowContent(SettingsRow r, const DetectionEngine& eng, char* valBuf, 
             value = valBuf;
             break;
         }
+        // The value names the host, not just ON: a switch that does not say
+        // where the bytes go is not consent. The two under the master read OFF
+        // while it is off, because that is what they are -- the master is not
+        // an override, it is an AND.
+        case SettingsRow::LORA_LOOKUPS:
+            label = "ONLINE LOOKUPS"; value = Settings::loraLookups() ? "ON" : "OFF";
+            break;
+        case SettingsRow::LORA_LK_CALL:
+            label = "  CALLSIGN DB";
+            value = (Settings::loraLookups() && Settings::loraLookupCall()) ? "hamrig.com" : "OFF";
+            break;
+        case SettingsRow::LORA_LK_OGN:
+            label = "  AIRCRAFT DB";
+            value = (Settings::loraLookups() && Settings::loraLookupOgn()) ? "glidernet.org" : "OFF";
+            break;
 #endif
         case SettingsRow::UPDATE_FIRMWARE:
             // The row names the newer version when one is known, so the boot
@@ -1114,8 +1197,15 @@ switch (Settings::background()) {
     else if (s_page == SettingsPage::WATCH)  pageTitle = ">> WATCH SETTINGS <<";
     Theme::drawTitleBar(t, pageTitle);
 
-    // +6, not +4: four group headers plus the two tracking rows.
-    DisplayItem items[LIST_MAX_N + 7];
+    // The slack over LIST_MAX_N is the headers plus the two tracking rows. The
+    // longest page is the T-Watch's main list: twenty-three rows in ALL_ROWS
+    // (which is LIST_MAX_N there), plus WATCH TARGET and HUNT TARGET, under
+    // five headings -- thirty items against a buffer of thirty. Nine, not the
+    // seven that was here: it left exactly nothing spare, and adding a heading
+    // should not be something that has to be counted against a buffer. The
+    // CrowPanel's SYSTEM page is fourteen: eleven rows and the three headings
+    // SYSTEM / COUNTERS / LORA now make (see groupFor()).
+    DisplayItem items[LIST_MAX_N + 9];
     uint8_t n = buildDisplayList(items);
     // Clamped here rather than in uiSettingsScroll(): row heights come from
     // live font metrics, which that function has no display to ask.
@@ -1171,7 +1261,7 @@ bool uiSettingsTapHeader(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
     int top, bodyBottom, rowH, headerH, tallH;
     computeGeom(t, screenH, top, bodyBottom, rowH, headerH, tallH);
 
-    DisplayItem items[LIST_MAX_N + 7];
+    DisplayItem items[LIST_MAX_N + 9];   // sized with the draw's, above
     uint8_t n = buildDisplayList(items);
     // Same clamp the draw applies, so a tap can never be tested against a
     // scroll position the screen is not actually showing.
@@ -1202,7 +1292,7 @@ SettingsRow uiSettingsHitTest(TFT_eSPI& t, int x, int y, int screenW, int screen
     int top, bodyBottom, rowH, headerH, tallH;
     computeGeom(t, screenH, top, bodyBottom, rowH, headerH, tallH);
 
-    DisplayItem items[LIST_MAX_N + 7];
+    DisplayItem items[LIST_MAX_N + 9];   // sized with the draw's, above
     uint8_t n = buildDisplayList(items);
     // Same clamp the draw applies, so a tap can never be tested against a
     // scroll position the screen is not actually showing.

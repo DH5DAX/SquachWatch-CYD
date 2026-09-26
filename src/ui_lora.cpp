@@ -6,6 +6,8 @@
 #include "lora_profiles.h"
 #include "lora_classify.h"
 #include "lora_nodes.h"
+#include "lora_ident.h"
+#include "lora_enrich.h"
 #include "settings.h"
 #include <Arduino.h>
 #include <string.h>
@@ -213,10 +215,40 @@ void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
         char age[8], flags[48], line[128];
         ageText(now, n.lastMs, age, sizeof age);
         Lora::Nodes::flagsText(n, flags, sizeof flags);
-        const uint16_t duty = Lora::Nodes::dutyPermille(n, now);
-        snprintf(line, sizeof line, "%-4s %-10.10s %-14.14s %4d %3u %4s %u.%u%% %s%s%s", Lora::protoShort(n.proto), n.tag,
-                 n.name[0] ? n.name : Lora::Nodes::roleText(n), (int)n.rssi, (unsigned)n.packets, age,
-                 duty / 10, duty % 10, n.hasPos ? "@ " : "", flags[0] ? "!" : "", flags);
+        // The signal column is a link measurement only for a frame this node
+        // transmitted itself. A row heard only through repeaters gets the
+        // relay's figure with a v in front of it: a bare "-73" in this column
+        // reads as a distance from here, and for a node eleven hops out it is
+        // the distance to the last repeater instead.
+        // The grid square takes the place of the bare "@" this column used to
+        // hold: six characters where two were, displacing the tail of the
+        // flags text, which is the only thing on the line with slack in it.
+        // Worth the trade -- "@" said a position had been decoded, a locator
+        // says where, in the unit the operators of these networks speak, and it
+        // is the node's OWN advertised position and never a licensee's.
+        char where[8] = "";
+        if (n.hasPos) Lora::Ident::grid(n.latE7, n.lonE7, where, sizeof where);
+        // One character for an online answer, beside the one the flags use: a
+        // dot when a lookup answered, a dash when it was asked and there was
+        // nothing to find or nobody to answer. Blank means nothing was asked,
+        // which is what every row says until a switch is turned on.
+        Lora::Enrich::Record er;
+        const bool asked = Lora::Enrich::cached(n.proto, n.id, er);
+        const char* look = !asked ? "" : er.answer == Lora::Enrich::ANS_HIT ? "." : "-";
+        char sig[10] = "--";
+        if (n.directPackets)   snprintf(sig, sizeof sig, "%d", (int)n.rssi);
+        else if (n.viaPackets) snprintf(sig, sizeof sig, "v%d", (int)n.viaRssi);
+        // The hour bucket tumbles, so a single 0.7 s frame 1.5 s into a fresh
+        // one is 46.6 % of it. Under five minutes there is no figure to show --
+        // which is the same floor the NF_DUTY flag has always had under it.
+        char dut[10] = "--";
+        if (Lora::Nodes::dutyKnown(n, now)) {
+            const uint16_t duty = Lora::Nodes::dutyPermille(n, now);
+            snprintf(dut, sizeof dut, "%u.%u%%", duty / 10, duty % 10);
+        }
+        snprintf(line, sizeof line, "%-4s %-10.10s %-14.14s %5s %3u %4s %-5s %-6s %s%s%s", Lora::protoShort(n.proto), n.tag,
+                 n.name[0] ? n.name : Lora::Nodes::roleText(n), sig, (unsigned)n.packets, age,
+                 dut, where, look, flags[0] ? "!" : "", flags);
         t.setTextColor(n.flags ? Theme::AMBER : col, Theme::BG);
         t.setCursor(12, y + 3);
         t.print(line);
@@ -342,15 +374,50 @@ void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     snprintf(b, sizeof b, "%lu rounds, %lu hits", (unsigned long)s.cadRounds, (unsigned long)s.cadHits);
     y = statLine(t, y, Theme::CYAN, "CAD:", b);
     const uint32_t up = millis() / 1000;
-    snprintf(b, sizeof b, "%lu.%lu s on the air heard, %lu.%02lu%% of uptime; noise %d dBm",
-             (unsigned long)(s.airtimeMs / 1000), (unsigned long)((s.airtimeMs / 100) % 10),
-             (unsigned long)(up ? s.airtimeMs / 10 / up : 0), (unsigned long)(up ? (s.airtimeMs * 10 / up) % 100 : 0), (int)s.noiseDbm);
+    snprintf(b, sizeof b, "%lu.%lu s of time on air heard; noise %d dBm",
+             (unsigned long)(s.airtimeMs / 1000), (unsigned long)((s.airtimeMs / 100) % 10), (int)s.noiseDbm);
     y = statLine(t, y, Theme::CYAN, "AIR:", b);
+    // Airtime over the time the receiver was actually on a profile -- which is
+    // the occupancy of that air while we were listening to it. Dividing by
+    // uptime instead, as this line used to, divides by the wall clock the
+    // survey spent on the other thirty-odd profiles and answers nothing.
+    if (s.listenMs) {
+        const uint32_t pct100 = (uint32_t)(((uint64_t)s.airtimeMs * 10000ull) / s.listenMs);
+        snprintf(b, sizeof b, "%lu s receiving, %lu%% of uptime; %lu.%02lu%% of it was frames",
+                 (unsigned long)(s.listenMs / 1000), (unsigned long)(up ? s.listenMs / 10 / up : 0),
+                 (unsigned long)(pct100 / 100), (unsigned long)(pct100 % 100));
+    } else {
+        snprintf(b, sizeof b, "the receiver has not been on yet");
+    }
+    y = statLine(t, y, Theme::CYAN, "LISTEN:", b);
     size_t o = 0;
     for (int p = 1; p < (int)Lora::Proto::COUNT && o + 12 < sizeof b; p++)
         if (s.byProto[p]) o += (size_t)snprintf(b + o, sizeof b - o, "%s%s %u", o ? "  " : "", Lora::protoShort((Lora::Proto)p), (unsigned)s.byProto[p]);
     if (s.byProto[0]) snprintf(b + o, sizeof b - o, "%s?? %u", o ? "  " : "", (unsigned)s.byProto[0]);
     y = statLine(t, y, Theme::CYAN, "BY NET:", o || s.byProto[0] ? b : "-");
+    // What has left this board, and what may. Amber when anything may leave,
+    // cyan when nothing can: the unusual state is the one that gets the colour,
+    // and here the unusual state is being allowed to talk about other people.
+    // The full log -- every identifier, every host, every status -- is LORA
+    // LOOKUPS on the console; there is no room for sixteen rows here and no
+    // screen to put them on yet.
+    {
+        Lora::Enrich::Progress pr;
+        Lora::Enrich::progress(pr, now);
+        if (!Settings::loraLookups()) {
+            snprintf(b, sizeof b, "off: nothing about a node leaves this board");
+        } else {
+            snprintf(b, sizeof b, "%s%s%s: %u sent, %u known, %u not listed, %u no answer%s",
+                     Settings::loraLookupCall() ? "hamrig.com" : "",
+                     (Settings::loraLookupCall() && Settings::loraLookupOgn()) ? " + " : "",
+                     Settings::loraLookupOgn() ? "glidernet.org" : "",
+                     (unsigned)pr.sent, (unsigned)pr.hit, (unsigned)pr.miss, (unsigned)pr.noAnswer,
+                     pr.queued ? ", more waiting for WiFi" : "");
+            if (!Settings::loraLookupCall() && !Settings::loraLookupOgn())
+                snprintf(b, sizeof b, "on, but every source is off: nothing leaves");
+        }
+        y = statLine(t, y, Settings::loraLookups() ? Theme::AMBER : Theme::CYAN, "LOOKUP:", b);
+    }
     y += 4;
     if (Lora::mode() == Lora::Mode::SWEEP || Lora::spectrumSweeps()) {
         snprintf(b, sizeof b, "%lu passes over 863-870 MHz%s", (unsigned long)Lora::spectrumSweeps(),

@@ -66,8 +66,8 @@ static const uint8_t N_BUILTIN = (uint8_t)(2 * N_PRESETS);
 static Channel s_user[MAX_USER];
 static uint8_t s_nUser = 0;
 // Index-for-index with channel(). A parallel array rather than a field in
-// Channel, because channel() rebuilds each preset from the tables above on
-// every call and a counter in that struct would be reset by its own getter.
+// Channel, because channel() builds each preset from the tables above on every
+// call and a counter in that struct would be reset by its own getter.
 static uint32_t s_frames[N_BUILTIN + MAX_USER];
 static uint32_t s_lastMs[N_BUILTIN + MAX_USER];
 
@@ -75,10 +75,16 @@ uint8_t channelCount() { return (uint8_t)(N_BUILTIN + s_nUser); }
 uint8_t userChannelCount() { return s_nUser; }
 uint8_t maxUserChannels() { return MAX_USER; }
 
-const Channel& channel(uint8_t i) {
-    static Channel c;
+// By value: see the note on MeshCore::channel(). One file-static rebuilt on
+// every call was a buffer shared between the decode on the radio task and the
+// CHANS view's thirty reads a second on loop(). Returning a copy also gives the
+// past-the-end case a defined answer -- a zeroed channel, which is disabled and
+// opens nothing -- where the static used to hand back whatever a previous
+// caller had left in it.
+Channel channel(uint8_t i) {
+    Channel c;
+    memset(&c, 0, sizeof c);
     if (i < N_PRESETS) {
-        memset(&c, 0, sizeof c);
         strncpy(c.name, PRESET_NAMES[i], sizeof c.name - 1);
         memcpy(c.key, DEFAULT_KEY, 16); c.keyLen = 16;
         c.hash = channelHash(c.name, c.key, 16);
@@ -87,7 +93,6 @@ const Channel& channel(uint8_t i) {
     }
     i -= N_PRESETS;
     if (i < N_PRESETS) {
-        memset(&c, 0, sizeof c);
         strncpy(c.name, PRESET_NAMES[i], sizeof c.name - 1);
         c.keyLen = 0;
         c.hash = channelHash(c.name, nullptr, 0);

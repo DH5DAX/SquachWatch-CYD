@@ -263,6 +263,21 @@ namespace Settings {
     uint8_t     loraFocus();
     void        setLoraFocus(uint8_t ix);
 
+    // ONLINE LOOKUPS: whether this board may ask a public service about a node
+    // it heard. Three switches, not one, because a master alone cannot say
+    // "aircraft yes, callsigns no" -- which is the setting a careful operator
+    // actually wants. All three default OFF, and that is the one place this
+    // differs in shape from updateCheck() below: that switch talks to
+    // first-party infrastructure about THIS board and defaults ON, these talk
+    // to third parties about OTHER PEOPLE. What each one sends, and the
+    // measured harm behind the default, is in include/lora_enrich.h.
+    bool        loraLookups();           // the master
+    void        toggleLoraLookups();
+    bool        loraLookupCall();        // hamrig.com, for APRS and MeshCom callsigns
+    void        toggleLoraLookupCall();
+    bool        loraLookupOgn();         // the OGN device database, for FANET
+    void        toggleLoraLookupOgn();
+
     // The channel keys the two mesh decoders hold, as one opaque blob. The
     // record format is Lora::Chan's business (include/lora_channels.h); this
     // is only the NVS entry, so that the store stays the one place that talks

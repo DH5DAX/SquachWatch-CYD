@@ -70,7 +70,8 @@ int main() {
         uint8_t ttnf[8] = { 0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x06, 0x12, 0x34 };
         ck("70B3D57ED0 is the TTN Foundation block", strcmp(ouiMaker(ttnf), "TTN Foundation") == 0);
         uint8_t other[8] = { 0x70, 0xB3, 0xD5, 0x12, 0x34, 0x56, 0x78, 0x9A };
-        ck("70B3D5 elsewhere is the MA-M pool", strstr(ouiMaker(other), "MA-M") != nullptr);
+        // MA-S: 70B3D5 is an OUI-36 pool (oui36.csv 4,092 rows, mam.csv none).
+        ck("70B3D5 elsewhere is the MA-S pool", strstr(ouiMaker(other), "MA-S") != nullptr);
         ck("22 bytes is not a join request", ({ pk.len = 22; !parse(pk.data, pk.len, f); }));
     }
 
@@ -83,18 +84,33 @@ int main() {
         ck("27xxxxxx too", n.op && strcmp(n.op, "The Things Network") == 0);
         lookupDevAddr(0x78000001u, n);
         ck("78xxxxxx is Helium", n.op && strcmp(n.op, "Helium") == 0);
+        // Names come from the published allocation verbatim now that the table
+        // is generated (tools/gen_netid.py), so Helium's rows read as the legal
+        // entity that holds them and the TTN row spells its foundation out.
+        // Longer than the 24-character node row, and truncated there like every
+        // other long name -- better a name that is the registry's than a
+        // shorter one this firmware invented.
         lookupDevAddr(0xE05A0001u, n);
-        ck("E05Axxxx is Helium's type 3", n.type == 3 && n.nwkId == 0x2D && n.op && strcmp(n.op, "Helium") == 0 && n.ambiguous);
+        ck("E05Axxxx is Helium's type 3", n.type == 3 && n.nwkId == 0x2D && n.ambiguous &&
+                                          n.op && strcmp(n.op, "Decentralized Wireless Foundation Inc") == 0);
         lookupDevAddr(0xFC014C01u, n);
-        ck("FC014Cxx is Helium's type 6", n.type == 6 && n.op && strcmp(n.op, "Helium") == 0);
+        ck("FC014Cxx is Helium's type 6", n.type == 6 && n.op &&
+                                          strcmp(n.op, "Decentralized Wireless Foundation Inc") == 0);
         lookupDevAddr(0xFC016001u, n);
-        ck("FC0160xx is the TTN Foundation", n.op && strcmp(n.op, "TTN Foundation") == 0);
+        ck("FC0160xx is the TTN Foundation", n.op && strcmp(n.op, "The Things Network Foundation") == 0);
         lookupDevAddr(0x74123456u, n);
         ck("74xxxxxx is Minol ZENNER", n.op && strcmp(n.op, "Minol ZENNER") == 0);
         lookupDevAddr(0x00000001u, n);
-        ck("00xxxxxx is a private network", n.op && strstr(n.op, "private"));
+        ck("00xxxxxx is a private network", n.op && strstr(n.op, "rivate"));
         lookupDevAddr(0x5E000000u, n);
         ck("an unlisted NwkID has no operator", n.op == nullptr);
+        // Rows the hand-written 39-row table never had, from the generated
+        // 143: one type 0 and one type 7, the type this firmware could not
+        // name at all before.
+        lookupDevAddr(0x1E000001u, n);
+        ck("0Fxxxxxx (type 0) now names Orange", n.type == 0 && n.op && strcmp(n.op, "Orange") == 0);
+        lookupDevAddr(0xFE002001u, n);
+        ck("a type 7 NetID resolves at all", n.type == 7 && n.op != nullptr);
     }
 
     suite("MAC commands in the clear");

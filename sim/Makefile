@@ -101,6 +101,8 @@ UI_SRCS  := $(SRC)/theme.cpp \
             $(SRC)/lora_aprs.cpp \
             $(SRC)/lora_fanet.cpp \
             $(SRC)/lora_nodes.cpp \
+            $(SRC)/lora_ident.cpp \
+            $(SRC)/lora_enrich.cpp \
             $(SRC)/detection_info.cpp \
             $(SRC)/device_info.cpp \
             $(SRC)/idle_events.cpp \

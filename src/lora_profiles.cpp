@@ -90,6 +90,39 @@ uint32_t meshtasticSlotHz(uint32_t startHz, uint32_t endHz, uint16_t bwKhz10,
     return startHz + bwHz / 2 + paddingHz + slot * slotWidth;
 }
 
+uint16_t dutyLimitPermille(uint32_t freqHz) {
+    // BNetzA Vfg. 91/2025, the sub-band table copied out of docs/LORA.md
+    // section 8 (which carries the URL). Ascending, first match wins, both
+    // edges inclusive -- so at a shared edge (865.0, 868.0) the earlier and
+    // stricter row is the one that answers, which is the right way round for a
+    // ceiling. The unlisted slivers between rows -- 868.6-868.7, 869.2-869.4,
+    // 869.65-869.7 -- and anything off the band get 0: no figure rather than a
+    // guessed one, and a node heard there is not flagged at all.
+    struct Band { uint32_t lo, hi; uint16_t permille; };
+    static const Band BANDS[] = {
+        // 433.05-434.79: 1 mW with no duty limit, or 10 mW at 10 %. The 10 %
+        // row is the one a transmitter heard here is most likely under. An
+        // amateur station on 433.775 / 433.175 is not under this general
+        // licence at all and has no duty limit, so a flag raised here says
+        // "over the SRD ceiling for this band", never "unlawful".
+        { 433050000u, 434790000u, 100 },
+        {  863000000u, 865000000u,   1 },   // 25 mW, 0.1 %
+        {  865000000u, 868000000u,  10 },   // 25 mW, 1 %. The four 200 kHz
+        // network channels inside 865.6-867.6 are allowed 2.5 % (10 % for a
+        // network access point), but docs/LORA.md does not give their centre
+        // frequencies, so whether WAN 867.1/867.3/867.5 are those channels is
+        // unverified and the 1 % row stands for them. The stricter reading is
+        // the one to be wrong in.
+        {  868000000u, 868600000u,  10 },   // 25 mW, 1 %
+        {  868700000u, 869200000u,   1 },   // 25 mW, 0.1 %
+        {  869400000u, 869650000u, 100 },   // 500 mW, 10 % -- the mesh band
+        {  869700000u, 870000000u,  10 },   // 5 mW at no limit, or 25 mW at 1 %
+    };
+    for (size_t i = 0; i < sizeof BANDS / sizeof BANDS[0]; i++)
+        if (freqHz >= BANDS[i].lo && freqHz <= BANDS[i].hi) return BANDS[i].permille;
+    return 0;
+}
+
 void formatMHz(uint32_t hz, char* out, size_t cap) {
     const uint32_t khz = (hz + 500) / 1000;
     snprintf(out, cap, "%lu.%03lu", (unsigned long)(khz / 1000), (unsigned long)(khz % 1000));

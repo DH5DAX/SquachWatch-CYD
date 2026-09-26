@@ -28,6 +28,7 @@ SemaphoreHandle_t  s_irqSem = nullptr;
 LoraRadio::BringUp s_up;
 uint32_t           s_calHz  = 0;       // where the image was last calibrated
 bool               s_implicit = false;
+uint16_t           s_preamble = 8;     // the profile's, for the time-on-air estimate
 uint8_t            s_implicitLen = 0;
 uint8_t            s_sf = 11;
 uint16_t           s_bw10 = 2500;
@@ -156,6 +157,7 @@ bool apply(const Lora::Profile& p) {
     if (st) { s_up.err = st; return false; }
     s_implicit    = (p.flags & Lora::PF_IMPLICIT) != 0;
     s_implicitLen = p.implicitLen;
+    s_preamble    = p.preamble;
     s_sf = p.sf; s_bw10 = p.bwKhz10; s_sync = p.sync; s_pflags = p.flags; s_freqHz = p.freqHz;
     return true;
 }
@@ -250,8 +252,25 @@ bool readPacket(Lora::Packet& pk) {
     }
     if (flags & RADIOLIB_SX126X_IRQ_CRC_ERR) pk.flags |= Lora::PK_CRC_ERR;
     else if (pk.flags & Lora::PK_CRC_PRESENT) pk.flags |= Lora::PK_CRC_OK;
-    pk.toaUs = Lora::timeOnAirUs(pk.sf, pk.bwKhz10, pk.cr ? pk.cr : 5,
-                                 s_implicit ? 10 : 8 /* the sender's, unknown; a floor */,
+    // The preamble is the one field of the air interface a received frame does
+    // not carry: the chip detects the preamble and reports nothing about how
+    // long it was. So this stays an estimate -- but the profile we are tuned to
+    // holds what the network's senders use, and that is a far better estimate
+    // than a flat 8 symbols. MeshCore Narrow sends 32 (src/lora_profiles.cpp),
+    // and 8 undercounts a 60-byte frame by 98 ms of 706, 13.9 %; Meshtastic's
+    // 16 undercounts a 66-byte LongFast frame by 66 ms of 723, 9.1 %.
+    // docs/LORA.md's reference table (0.71 s for MeshCore Narrow at 60 bytes,
+    // 1.1 s for MeshCom at 80) only comes out of this formula with the
+    // profile's own preamble, so the table was always the check on this line.
+    // Airtime feeds the duty figure, and a duty figure a tenth low is the one
+    // error here with a legal meaning. The estimate is no longer guaranteed low
+    // in one direction: a sender on firmware older than the preset's preamble
+    // change -- MeshCore before 1.16, which sent 8 where the table now says 32
+    // -- is overcounted by that difference. That is a bounded error on a
+    // shrinking set of nodes, against a systematic 10-14 % undercount on all of
+    // them; if a frame ever carries its preamble length, this line should use
+    // that instead.
+    pk.toaUs = Lora::timeOnAirUs(pk.sf, pk.bwKhz10, pk.cr ? pk.cr : 5, s_preamble,
                                  pk.len, (pk.flags & Lora::PK_CRC_PRESENT) != 0, s_implicit,
                                  (s_pflags & Lora::PF_LDRO) != 0);
     return true;

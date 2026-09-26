@@ -65,6 +65,20 @@ const Stats& stats();
 uint8_t nodeCount();
 uint8_t nodeOrder(uint8_t* idx, uint8_t cap);
 bool    nodeAt(uint8_t i, Nodes::Node& out);
+// A page of the table in ONE lock acquisition, newest first: up to `cap` rows
+// starting at `from` in that order. Returns how many were written, which is
+// short of `cap` at the end of the table.
+//
+// The reason it exists rather than a loop over nodeAt(): note() runs on the
+// radio task INSIDE the same mutex (src/lora_sniffer.cpp's push), so every
+// acquisition here is a chance to wait on a decoder. Drawing fourteen rows
+// took fifteen acquisitions -- one for the order and one per row -- and the
+// enrichment scan wants the same copy anyway. One call, one wait.
+//
+// Paged rather than whole because the whole table is 96 rows of about 100
+// bytes, and ten kilobytes is neither a stack buffer nor a good use of the
+// internal RAM there is.
+uint8_t nodeSnapshot(Nodes::Node* out, uint8_t cap, uint8_t from = 0);
 
 // ---- the channel keys, for the CHANNELS view --------------------------------
 // One row per key worth showing. The screens go through here rather than
@@ -128,6 +142,7 @@ inline const Stats& stats() { static Stats s = {}; return s; }
 inline uint8_t nodeCount() { return 0; }
 inline uint8_t nodeOrder(uint8_t*, uint8_t) { return 0; }
 inline bool nodeAt(uint8_t, Nodes::Node&) { return false; }
+inline uint8_t nodeSnapshot(Nodes::Node*, uint8_t, uint8_t = 0) { return 0; }
 struct ChannelRow {
     Proto    proto;
     char     name[24];
