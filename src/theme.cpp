@@ -544,7 +544,35 @@ void drawButtonBar(TFT_eSPI& t, ButtonId highlighted, ButtonBarMode mode) {
 
 ButtonId hitTestButtonBar(int x, int y, int screenW, int screenH) {
     ButtonBarGeom g = computeButtonBar(screenW, screenH);
-    if (y < g.y || y > g.y + g.h) return ButtonId::NONE;
+    // THE BAR OWNS EVERY ROW FROM ITS TOP EDGE TO THE BOTTOM OF THE GLASS, not
+    // only the twenty-one its buttons are drawn in. computeButtonBar puts them
+    // at screenH - h - 6, so there are five rows underneath that no button is
+    // drawn in: bare on LOG and on the DEX card, animated wallpaper on CLEAR
+    // (measured on the fire background at frame 90: 1,200 lit pixels in rows
+    // 235..239 of the 400x240 canvas, 240 of them under the two outer buttons).
+    // Five logical rows is 1.9 mm on the
+    // CrowPanel (400x240 doubled onto a 152.4 x 91.4 mm panel: 0.381 mm to the
+    // logical pixel) and 0.9 mm on the 2.8" CYD. A press aimed at a button and
+    // landing at the very bottom edge of the screen used to miss it, and on
+    // CLEAR it did something else instead: taps outside the bar in the left and
+    // right tenths of the screen cycle the background, and the bar's outer two
+    // buttons sit in those tenths, so the last five rows under [ SCAN ] and
+    // under [ DESK ] changed the wallpaper. That band is 32 x 5 logical pixels
+    // in each bottom corner -- 12.2 x 1.9 mm.
+    //
+    // With the bottom rows included, each button is 26 rows: 9.9 mm on the
+    // CrowPanel against a 9 mm finger, where it was 8.0 mm. On CLEAR that takes
+    // the corner slivers away from the wallpaper cycler -- a labelled 122 px
+    // button beats an unlabelled 32 px patch of the same rows, and main.cpp's
+    // inEdgeZone already claimed the outer buttons win there. Touchable and
+    // drawn are not the same rectangle after this; if that ever shows, draw the
+    // bar 26 rows tall rather than shrinking the hit test back.
+    //
+    // This is the rule pinnedBackHit() has always kept (it tests y < screenH),
+    // and the rule the LORA screen's bar was given after a press two
+    // millimetres low opened a frame instead of the view picker. Two bottom
+    // strips in one codebase should not disagree about who owns the last pixel.
+    if (y < g.y || y >= screenH) return ButtonId::NONE;
     if (x >= g.x[0] && x <= g.x[0] + g.w[0]) return ButtonId::SCAN;
     if (x >= g.x[1] && x <= g.x[1] + g.w[1]) return ButtonId::LOG;
     if (x >= g.x[2] && x <= g.x[2] + g.w[2]) return ButtonId::CLR;

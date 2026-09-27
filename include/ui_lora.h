@@ -23,6 +23,16 @@
 // survey's START/STOP is a 392-pixel button because it is pressed with a thumb
 // while the other hand holds an antenna.
 //
+// THE BAR OWNS EVERY PIXEL UNDER THE BODY, not only the twenty its buttons are
+// drawn in. It is drawn six pixels short of the bottom of the screen and the
+// body stops four above it, and those eight rows of nothing -- two millimetres
+// either side of a 7.6 mm target -- used to fall through to the view's own hit
+// test, where the frame list's row arithmetic opened a frame. That is what the
+// owner hit: "ich klicke auf VIEWS, ich bekomme einen einzelnen frame
+// angezeigt; erst wenn ich nochmal klicke, kann ich die views auswaehlen." A
+// press two millimetres off a button presses that button. sim/test_lora_bar.sh
+// holds it, edge to edge, off the board.
+//
 // THE MIDDLE BUTTON IS THE PICKER IN EVERY VIEW, and the sentence above was not
 // true of the code until the bar was fixed: PACKET relabelled slot 1 to "[ < ]"
 // and stepped frames with it, so the views button was the views button in nine

@@ -32,6 +32,8 @@
 #include "ui_diary.h"
 #include "ui_hunt.h"
 #include "ui_rawscan.h"
+// sim/detection_sim.cpp: the SSID fixture the raw scanner's WiFi side needs.
+void simRawWifiFixture(bool on);
 #include "squachmesh.h"
 #include "ui_phone.h"
 #include "qwerty.h"
@@ -71,6 +73,7 @@
 #include "ota_core.h"
 #include "ui_wifinets.h"
 #include "ui_lora.h"
+#include "lora_sniffer.h"
 #include "png_writer.h"
 #include "touch_cal.h"
 
@@ -301,9 +304,31 @@ static void usage() {
         "  --frames N        animation warm-up frames before capture (default 90)\n"
         "  --onboard         let Squachy's first-boot walkthrough run\n"
         "  --sequence N      capture N consecutive frames instead of one\n"
-        "  --tap F:X:Y       tap the BACKGROUND at x,y on warm-up frame F (repeatable)\n"
+        "  --tap F:X:Y       tap at x,y on warm-up frame F (repeatable): the BACKGROUND\n"
+        "                    on most screens, the LORA screen itself on that one\n"
+        "  --loraview N      lora screen: open on LoraView N (0 LIST .. 9 PICK)\n"
+        "  --rawwifi         rawscan screen: the WiFi side, with an SSID fixture\n"
         "  --raw PATH        write raw RGB888 frames to PATH instead of PNGs --\n"
         "                    what the GUI consumes, no encode/decode on either side\n");
+}
+
+// One press on the LORA screen, delivered the way src/main.cpp's AppState::LORA
+// case delivers one: through uiLoraTap, ON RELEASE, at the position the finger
+// went DOWN at, once per press. A tap here is a press and a release with no
+// travel between them, so the down and the up position are the same one -- the
+// distinction is what matters on glass (a thumb that drifts a whole row scrolls
+// the list instead of tapping it, uiLoraDragStep) and it is why the coordinate
+// the firmware hands to uiLoraTap is the DOWN one.
+//
+// The result goes to stderr because it is the thing a test asserts on: which
+// view the press left the screen showing. LoraTap::BACK is the screen asking to
+// be left, and the one-shot renderer has no state machine to leave it with, so
+// it says so and stays.
+static void loraPress(TFT_eSPI& t, int x, int y, int W, int H) {
+    const LoraTap r = uiLoraTap(t, x, y, W, H);
+    fprintf(stderr, "[lora] tap %d,%d -> %s, view %d\n", x, y,
+            r == LoraTap::BACK ? "BACK" : r == LoraTap::HANDLED ? "HANDLED" : "NONE",
+            (int)uiLoraView());
 }
 
 int main(int argc, char** argv) {
@@ -330,6 +355,13 @@ int main(int argc, char** argv) {
     // is a real layout with real wrapped text and it was previously only
     // reachable on hardware, which is how two of its paragraphs went stale.
     int infoType = -1;
+    // --loraview N opens the LORA screen on LoraView N (the enum's own order in
+    // include/ui_lora.h, 0 = LIST). The picker and the two views that need a
+    // subject chosen first are reached with --tap, exactly as on the device.
+    int loraView = -1;
+    // The raw scanner's WiFi side rather than its BLE side; see the rawscan
+    // branch below for the fixture each of them gets.
+    bool rawWifi = false;
     // --alert N picks WHICH seeded detection the ALERT screen fires on,
     // by DetectionType. Without it the screen always alerted on logAt(0)
     // -- whatever was seeded last -- so every alert frame ever rendered
@@ -380,6 +412,8 @@ int main(int argc, char** argv) {
         else if (a == "--showoff") showoff = true;
         else if (a == "--confirm" && i + 1 < argc) confirmRow = atoi(argv[++i]);
         else if (a == "--info" && i + 1 < argc) infoType = atoi(argv[++i]);
+        else if (a == "--loraview" && i + 1 < argc) loraView = atoi(argv[++i]);
+        else if (a == "--rawwifi") rawWifi = true;
         else if (a == "--alert" && i + 1 < argc) alertType = atoi(argv[++i]);
         else if (a == "--first") alertFirst = true;
         else if (a == "--night") alertNight = true;
@@ -614,7 +648,7 @@ int main(int argc, char** argv) {
         else if (screen == "desk")     uiDeskTick(frame, t, engine);
         else if (screen == "zonecard") { uiClearTick(frame, t, engine, true, false); uiZoneCardDraw(frame, t); }
         else if (screen == "hunt")     uiHuntTick(frame, t, engine);
-        else if (screen == "rawscan")  uiRawScanTick(frame, t, engine, true, true, false, "", false, false);
+        else if (screen == "rawscan")  uiRawScanTick(frame, t, engine, !rawWifi, true, false, "", false, false);
         else if (screen == "phone")    uiPhoneTick(frame, t, engine);
         else if (screen == "bingo")    uiBingoTick(frame, t, engine);
         else if (screen == "dex")      uiDexTick(frame, t, engine);
@@ -754,7 +788,35 @@ int main(int argc, char** argv) {
         if (const char* ep = getenv("SQUACHSIM_EPOCH")) Clock::setEpoch((uint32_t)strtoul(ep, nullptr, 10));
         if (getenv("SQUACH_ALERT") && engine.logAt(0)) uiDeskAlert(*engine.logAt(0), now);
     }
-    else if (screen == "rawscan")    uiRawScanInit(frame, true);
+    else if (screen == "rawscan")    {
+        // The raw scanner had no fixture on either side, so this screen has
+        // never been rendered off the board with a result in it -- and it is
+        // one of the two lists where a name is printed at size 2 beside a
+        // right-aligned RSSI on the same line. --rawwifi renders the WiFi
+        // side (sim/detection_sim.cpp's SSID fixture); BLE is the default and
+        // gets its rows here. Both sets are deliberately long and share a
+        // prefix, because that is the case a cut name loses, and every one of
+        // them says SIM.
+        uiRawScanInit(frame, !rawWifi);
+        if (rawWifi) {
+            simRawWifiFixture(true);
+        } else {
+            static const struct { const char* name; int8_t rssi, prev; } BLE[] = {
+                { "SIM Galaxy Buds Pro (R4X)", -61, -61 },
+                { "SIM Galaxy Buds Pro (L2A)", -66, -72 },
+                { "SIM-Tile-9F2C",             -80, -76 },
+                { "",                          -88, -88 },
+                { "SIM Watch6 Classic 47mm",   -54, -54 },
+            };
+            for (unsigned i = 0; i < sizeof BLE / sizeof BLE[0]; i++) {
+                RawBleResult r{};
+                snprintf(r.name, sizeof r.name, "%s", BLE[i].name);
+                r.rssi = BLE[i].rssi; r.prev = BLE[i].prev;
+                for (int b = 0; b < 6; b++) r.mac[b] = (uint8_t)(0xA0 + i * 16 + b);
+                engine.postRawBle(r);
+            }
+        }
+    }
     else if (screen == "watchalert") {
         // Watching the seeded AirTag, with a signal that has been climbing for
         // the last twenty seconds -- so the screen has a name, a type and a
@@ -769,15 +831,21 @@ int main(int argc, char** argv) {
     else if (screen == "colorcheck") uiColorCheckInit(frame);
     else if (screen == "icons")      {}
     else if (screen == "lora")       {
-        // The LORA screen has ten views and no radio behind it here, so what
-        // this renders is the chrome and the empty states -- which is most of
-        // what layout work is about, and all of it that can be checked without
-        // the board. SQUACHSIM_LORAVIEW=N is the LoraView to open on;
-        // SQUACHSIM_LORATAP="x,y" issues one tap first, which is how the views
-        // that need a subject chosen (the picker, a channel's messages) are
-        // reached here as well as on the device.
+        // The radio that is not there: sim/lora_sim.cpp's fixture, which is
+        // what turns this from ten views of "NO MODULE" into ten views with
+        // frames, nodes, keys, messages and two survey runs in them. It says
+        // SIM on every row it invents; see that file's header.
+        //
+        // --loraview N opens on a LoraView (the enum's own order, 0 = LIST),
+        // and --tap F:X:Y presses the screen -- through uiLoraTap, at the
+        // position the finger went down at, the way src/main.cpp's
+        // AppState::LORA case delivers a press (see loraPress above). Between
+        // them every one of the ten views is reachable here, including the two
+        // that need a subject chosen first and the picker over them.
+        Lora::begin();
         const char* v = getenv("SQUACHSIM_LORAVIEW");
-        uiLoraInit(frame, (LoraView)(v ? atoi(v) : 0));
+        uiLoraInit(frame, (LoraView)(loraView >= 0 ? loraView : v ? atoi(v) : 0));
+        // The older env-var form of one tap, kept: scripts use it.
         if (const char* tp = getenv("SQUACHSIM_LORATAP")) {
             int tx = 0, ty = 0;
             if (sscanf(tp, "%d,%d", &tx, &ty) == 2) uiLoraTap(frame, tx, ty, W, H);
@@ -1012,6 +1080,16 @@ int main(int argc, char** argv) {
         else                             uiSettingsScroll(1);
     }
 
+    // Where a --tap goes depends on the screen. The flag was added for the
+    // background eggs (Theme::backgroundTap), and on the LORA screen -- ten
+    // views behind three buttons, none of it reachable off the board until now
+    // -- a tap that only reached the wallpaper would be of no use at all:
+    // there it is a press on the screen.
+    auto injectTap = [&](int x, int y, uint32_t t) {
+        if (screen == "lora") loraPress(frame, x, y, W, H);
+        else                  Theme::backgroundTap(x, y, t);
+    };
+
     for (int i = 0; i < frames; i++) {
         const uint32_t tNow = now + (uint32_t)i * STEP_MS;
         if (!tick(tNow)) { usage(); return 2; }
@@ -1019,7 +1097,7 @@ int main(int argc, char** argv) {
         // backgroundTap() hit-tests published positions and ignores anything
         // that has not been refreshed in the last few frames.
         for (int k = 0; k < tapN; k++)
-            if (taps[k].f == i) Theme::backgroundTap(taps[k].x, taps[k].y, tNow);
+            if (taps[k].f == i) injectTap(taps[k].x, taps[k].y, tNow);
     }
 
     // Capture runs on from where the warm-up left off, so a sequence is
@@ -1038,7 +1116,7 @@ int main(int argc, char** argv) {
         // --tap frame numbers run straight on through the capture, so a tap
         // can land on a frame you can actually look at afterwards.
         for (int k = 0; k < tapN; k++)
-            if (taps[k].f == frames + s) Theme::backgroundTap(taps[k].x, taps[k].y, sNow);
+            if (taps[k].f == frames + s) injectTap(taps[k].x, taps[k].y, sNow);
         frame.pushSprite(0, 0);
         std::vector<uint8_t> rgb = toRgb888(tft.pixelsRGB565());
 

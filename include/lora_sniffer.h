@@ -34,7 +34,13 @@ struct Stats {
     uint16_t byProto[(int)Proto::COUNT];
 };
 
-#if SQUACH_LORA
+// SQUACH_LORA_FAKE takes this branch with sim/lora_sim.cpp as the definitions
+// instead of src/lora_sniffer.cpp: the emulator has to be able to DRIVE this
+// screen, and the no-op branch below renders ten views of nothing. It is a
+// second macro rather than -DSQUACH_LORA in sim/Makefile because SQUACH_LORA
+// also switches on the network halves of lora_feed.cpp and lora_enrich.cpp,
+// which want WiFi.h and HTTPClient.h, and sim/ has no WiFi shim.
+#if SQUACH_LORA || SQUACH_LORA_FAKE
 // After the WiFi and Bluetooth radios are up. True when a module answered.
 bool begin();
 bool present();

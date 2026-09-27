@@ -115,6 +115,25 @@ static const char* stateName(AppState s) {
         case AppState::WIFI_PASS: return "WIFI_PASS";
         case AppState::MESH_PHRASE: return "MESH_PHRASE";
         case AppState::MESH_COMPOSE: return "MESH_COMPOSE";
+        // These were missing, and "?" is a poor thing to assert on: a harness
+        // driving the real state machine (sim/test_button_bar.sh) reads this
+        // name out of the frame header and cannot tell DESK from LORA from a
+        // state that does not exist. Names for every screen a tap can reach.
+        case AppState::OUTFIT_UNLOCK: return "OUTFIT_UNLOCK";
+        case AppState::IGNORE_LIST: return "IGNORE_LIST";
+        case AppState::POWER_SAVER: return "POWER_SAVER";
+        case AppState::PHONE: return "PHONE";
+        case AppState::STATUS_LIGHT: return "STATUS_LIGHT";
+        case AppState::NUDGE: return "NUDGE";
+        case AppState::SQUAD_UPDATE: return "SQUAD_UPDATE";
+        case AppState::INVITE: return "INVITE";
+        case AppState::DESK: return "DESK";
+        case AppState::WIFI_NETS: return "WIFI_NETS";
+        case AppState::WIFI_ADD: return "WIFI_ADD";
+        case AppState::SYS_PROPS: return "SYS_PROPS";
+        case AppState::BINGO: return "BINGO";
+        case AppState::DEX: return "DEX";
+        case AppState::LORA: return "LORA";
         default: return "?";
     }
 }

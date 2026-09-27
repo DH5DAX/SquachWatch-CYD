@@ -21,7 +21,10 @@ void uiDiagnosticsInit(TFT_eSPI& t) {
 bool uiDiagnosticsHitBack(int x, int y, int screenW, int screenH) {
     int bx, by, bw, bh;
     backButtonRect(screenW, screenH, bx, by, bw, bh);
-    return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+    // To the bottom of the glass, not to the drawn edge: Theme::hitTestButtonBar
+    // explains the five bare rows under every bar built from computeButtonBar
+    // and why a press landing in them is the button's. Same rule here.
+    return x >= bx && x <= bx + bw && y >= by && y < screenH;
 }
 
 static int drawLine(TFT_eSPI& t, int y, uint16_t labelColor, const char* label, const char* fmt, ...) {

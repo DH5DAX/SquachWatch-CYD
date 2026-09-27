@@ -1,6 +1,7 @@
 // SquachWatch-CYD — the LORA screen. See include/ui_lora.h.
 #include "ui_lora.h"
 #include "ui_scroll.h"
+#include "ui_fit.h"
 #include "theme.h"
 #include "lora_sniffer.h"
 #include "lora_profiles.h"
@@ -127,8 +128,13 @@ void ageText(uint32_t now, uint32_t ms, char* out, size_t cap) {
 // prints on the console (src/lora_sniffer.cpp's surveySpan).
 void spanText(uint32_t ms, char* out, size_t cap) {
     const uint32_t s = ms / 1000;
-    if (s < 120) snprintf(out, cap, "%lus", (unsigned long)s);
-    else         snprintf(out, cap, "%lum%02lus", (unsigned long)(s / 60), (unsigned long)(s % 60));
+    if (s < 120)       snprintf(out, cap, "%lus", (unsigned long)s);
+    else if (s < 3600) snprintf(out, cap, "%lum%02lus", (unsigned long)(s / 60), (unsigned long)(s % 60));
+    // An hour form, because a run that walks a site for an afternoon read
+    // "125m30s" -- seven glyphs where "2h05m" is five, in cells that are now
+    // measured to the glyph (drawCmpStrip). The seconds go: at an hour they
+    // are noise.
+    else               snprintf(out, cap, "%luh%02lum", (unsigned long)(s / 3600), (unsigned long)((s / 60) % 60));
 }
 
 // snr4 is quarter-dB in an int8_t and C++ truncates toward zero, so -3 quarters
@@ -246,8 +252,18 @@ void drawTitle(TFT_eSPI& t, int w, const char* title) {
 void drawBar(TFT_eSPI& t, int w, int h) {
     const Bar b = bar(w, h);
     const char* l[3]; barLabels(l);
-    for (int i = 0; i < 3; i++)
-        if (l[i]) Theme::drawButton(t, b.x[i], b.y, b.w, b.h, l[i], false);
+    for (int i = 0; i < 3; i++) {
+        if (l[i]) { Theme::drawButton(t, b.x[i], b.y, b.w, b.h, l[i], false); continue; }
+        // A slot barLabels() gives up is drawn as empty space -- and the space
+        // has to be PAINTED. The per-frame repaint stops at bodyBottom and
+        // never reaches the bar, so what was actually on the glass was the
+        // button the view before had put there: the picker, the one view that
+        // gives up two slots, kept showing [ VIEWS ] and [ SURVEY ] over a
+        // screen that IS the views, and uiLoraTap declines both. Two live-
+        // looking buttons that do nothing, on the screen whose whole complaint
+        // was that the views button behaves oddly.
+        t.fillRect(b.x[i], b.y, b.w, b.h, Theme::BG);
+    }
 }
 
 // One line under the title: the mode, where the radio is, and the numbers that
@@ -597,6 +613,13 @@ void drawNodes(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
 
 int chansListTop(TFT_eSPI& t) { t.setTextSize(1); return statusBottom(t) + t.fontHeight() + 4; }
 
+// ...and where it stops, which is short of the body's own bottom: the sentence
+// at the foot of the view saying what a finger can do here is not a row. Here
+// rather than spelled out in both places for the same reason as chansListTop --
+// the hit test had no bottom at all, so that sentence, and the bare screen
+// under the bar with it, opened whichever channel the row arithmetic landed on.
+int chansListBottom(TFT_eSPI& t, int bottom) { t.setTextSize(1); return bottom - (t.fontHeight() + 2) - 2; }
+
 void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     t.setTextSize(1);
     const int rh = rowH(t);
@@ -616,7 +639,7 @@ void drawChans(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     t.print(head);
 
     const int listTop = chansListTop(t);
-    const int listBottom = bottom - lh - 2;
+    const int listBottom = chansListBottom(t, bottom);
     const uint8_t count = Lora::channelRowCount();
     uiClampScroll(s_scroll[(int)LoraView::CHANS], count, listBottom - listTop, rh);
     int y = listTop;
@@ -937,8 +960,35 @@ void drawTraffic(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     if (wn) snprintf(v2, sizeof v2, "%lu.%lu%%", (unsigned long)(wpm / wn / 10), (unsigned long)((wpm / wn) % 10));
     else    snprintf(v2, sizeof v2, "-");
     snprintf(v3, sizeof v3, "%d", (int)Lora::stats().noiseDbm);
-    drawBigNumber(t, 8,   top, "frames/min", v1, Theme::WHITE);
-    drawBigNumber(t, 150, top, "of the air", v2, Theme::WHITE);
+    // THE CAPTION SAYS HOW MUCH TIME IS UNDER THE FIGURE while there is less
+    // than the window's worth. TR_WINDOW is fifteen buckets -- thirty seconds --
+    // and the comment on it says the window is that long so that "one frame does
+    // not swing it". That was true of the divisor and not of the fill: the loop
+    // above averages over however many buckets EXIST, so a screen opened four
+    // seconds ago divides by two, and one frame in one two-second bucket was
+    // printed as "30" in 24-pixel type. Thirty frames a minute, from one frame.
+    //
+    // The survey next door withholds a median until it has three frames
+    // (EVIDENCE_MIN, include/lora_survey.h) because a figure without its
+    // evidence is the lie this whole phase exists to avoid. Withholding here
+    // would blank the headline for half a minute every time the screen is
+    // opened, so instead the figure stands and says what it rests on, in the
+    // same "-8s" idiom the graph under it already labels its own left edge with.
+    // Fifteen glyphs at size 1 is 90 px; the narrowest of the three columns is
+    // 120 px wide (8, 150, 280 across 400), so it fits without moving anything.
+    char c1[20], c2[20];
+    const unsigned span = (unsigned)wn * (TR_MS / 1000u);
+    // wn == 0 needs no qualifier: the figure is already "-", and "-0s" under a
+    // dash is two ways of saying nothing.
+    if (wn == 0 || wn >= TR_WINDOW) {
+        snprintf(c1, sizeof c1, "frames/min");
+        snprintf(c2, sizeof c2, "of the air");
+    } else {
+        snprintf(c1, sizeof c1, "frames/min -%us", span);
+        snprintf(c2, sizeof c2, "of the air -%us", span);
+    }
+    drawBigNumber(t, 8,   top, c1, v1, Theme::WHITE);
+    drawBigNumber(t, 150, top, c2, v2, Theme::WHITE);
     drawBigNumber(t, 280, top, "noise dBm", v3, Theme::VAPOR_PURPLE);
 
     // One row of what LIST does, so the screen is visibly live.
@@ -1396,14 +1446,43 @@ void drawCmpStrip(TFT_eSPI& t, uint32_t now, int w, int top) {
         char c[2] = { role, '\0' };
         t.setCursor(bx + 3, by + 3); t.print(c);
         t.setTextSize(1);
-        char l1[20], l2[20];
+        // WHAT THE LABEL GETS, measured from the cell instead of guessed. The
+        // line starts at bx + 18 -- right of the size-2 role letter -- and stops
+        // three pixels short of the border, so on the CrowPanel's 95 px box it
+        // is 74 px, twelve glyphs of the fixed-pitch built-in font (ui_fit.h),
+        // two of which are the "N " that names the run: the same number the
+        // DELETE panel and LORA SURVEY DROP use, and the only way to say which
+        // box you mean. Ten for the label, against a flat nine before -- and
+        // nine was flat whatever the panel measured.
+        //
+        // The cut is a MIDDLE cut, which is the part that matters more than the
+        // extra glyph. Labels are typed by a person and people prefix by
+        // category: "dipole at the mast" and "dipole at the balcony rail" agree
+        // for thirteen characters, and the simulator's own fixture is "sim walk
+        // A" and "sim walk B". Cut from the head, five different antennas draw
+        // the same cell in the one strip whose whole job is telling two runs
+        // apart. Head and tail with '>' between them keeps what differs.
+        const int cell = UiFit::chars(bw - 18 - 3);
+        char l1[32], l2[24], lab[24];
         if (!used) {
             snprintf(l1, sizeof l1, "%u -", (unsigned)(i + 1));
             l2[0] = '\0';
         } else {
             char span[14]; spanText((r.stopMs ? r.stopMs : now) - r.startMs, span, sizeof span);
-            snprintf(l1, sizeof l1, "%u %-9.9s", (unsigned)(i + 1), r.label);
+            UiFit::fitMid(lab, sizeof lab, r.label, cell - 2);
+            snprintf(l1, sizeof l1, "%u %s", (unsigned)(i + 1), lab);
+            // THE SECOND LINE IS MEASURED TOO. It starts at bx + 3 and stops
+            // three short of the border: bw - 6, fourteen glyphs on the
+            // CrowPanel's 95 px cell, eleven on the CYD's 75. Frames and span
+            // grow with a long walk -- "12345f 42n 1h05m" is sixteen -- and
+            // wrap is off for this screen, so an unmeasured line ran through
+            // the border. The node count is the first to go: frames and span
+            // are what say how much evidence a run holds and how long it took,
+            // and the nodes are on the compare view proper.
+            const int room = UiFit::chars(bw - 6);
             snprintf(l2, sizeof l2, "%luf %un %s", (unsigned long)r.frames, (unsigned)r.nodes, span);
+            if ((int)strlen(l2) > room) snprintf(l2, sizeof l2, "%luf %s", (unsigned long)r.frames, span);
+            if ((int)strlen(l2) > room) { char full[24]; memcpy(full, l2, sizeof full); UiFit::fitHead(l2, sizeof l2, full, room); }
         }
         t.setCursor(bx + 18, by + 4);  t.print(l1);
         t.setCursor(bx + 3,  by + 18); t.print(l2);
@@ -1615,7 +1694,7 @@ void drawDelPanel(TFT_eSPI& t, int w, int h, uint32_t now) {
     t.setTextSize(1);
     t.setTextWrap(false);
     const bool rec = Lora::surveyRecording() == s_delRun;
-    char line[64];
+    char line[80];
     // DELETE on the glass and DROP on the console, each matching the words
     // around it: the button under this asks in the owner's own word ("loeschen"),
     // and LORA SURVEY DROP matches LORA CHAN DROP, which is the console file's
@@ -1628,17 +1707,29 @@ void drawDelPanel(TFT_eSPI& t, int w, int h, uint32_t now) {
     // so that the panel is enough to decide on: the label, the evidence, and --
     // the one that changes the answer -- whether this is the run RECORDING.
     char span[14]; spanText((r.stopMs ? r.stopMs : now) - r.startMs, span, sizeof span);
-    snprintf(line, sizeof line, "\"%.12s\"  %luf %un %s%s", r.label, (unsigned long)r.frames,
-             (unsigned)r.nodes, span, rec ? "  RECORDING" : "");
     // Cut to the panel rather than to the screen. Wrap is off here, so a long
     // line would print straight through the border and out the other side --
     // which on a 240 px panel, where the box is 200 wide and this line can reach
     // 32 characters, it does. Six pixels a glyph at size 1, the same arithmetic
     // the frame view and the comparison use for their own wrapping.
-    {
-        const int cols = (pw - 20) / 6;
-        if (cols > 0 && (int)strlen(line) > cols) line[cols] = '\0';
-    }
+    //
+    // The REST of the line is built first so the label can be given what is
+    // actually left, instead of the flat twelve characters this used to take
+    // off a 23-character label. On the CrowPanel the panel is 300 px wide, 46
+    // glyphs, and the counts and span are about twelve of them: the label gets
+    // its whole 23 when nothing else is competing, and gives way -- not the
+    // other way round -- to RECORDING, which is eleven characters and is the
+    // one word on this panel that changes the answer.
+    char rest[40];
+    snprintf(rest, sizeof rest, "  %luf %un %s%s", (unsigned long)r.frames,
+             (unsigned)r.nodes, span, rec ? "  RECORDING" : "");
+    const int cols = (pw - 20) / 6;
+    int room = cols - 2 - (int)strlen(rest);   // 2 for the quotes around it
+    if (room < 6) room = 6;                    // a panel this narrow is not this feature's problem
+    char shown[28];
+    UiFit::fitMid(shown, sizeof shown, r.label, room);
+    snprintf(line, sizeof line, "\"%s\"%s", shown, rest);
+    if (cols > 0 && (int)strlen(line) > cols) line[cols] = '\0';
     t.setTextColor(rec ? Theme::AMBER : Theme::WHITE, Theme::BG);
     t.setCursor(px + 10, py + 8 + 11);
     t.print(line);
@@ -2069,8 +2160,27 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
         return LoraTap::HANDLED;
     }
 
-    // ---- the bar
-    if (y >= b.y && y <= b.y + b.h) {
+    // ---- the bar, which owns EVERY pixel under the body
+    //
+    // Not just the twenty the buttons are drawn in, and this is the bug the
+    // owner reported from the bench: press [ VIEWS ] on the frame list and get
+    // a single FRAME; press it again and get the picker.
+    //
+    // Theme::computeButtonBar puts the bar at screenH - h - 6 and bodyBottom
+    // stops four pixels above it, so on the CrowPanel's 400x240 canvas the
+    // buttons are y 214..233 with 211..213 of bare screen above them and
+    // 235..239 below: 1.1 mm and 1.9 mm of nothing flanking a 7.6 mm target
+    // (0.381 mm to the logical pixel, see rowH). Those eight rows used to fall
+    // straight through to the body's hit tests, and the LIST view's row
+    // arithmetic -- (y - top) / rowH, bounded by the frame count and by nothing
+    // else -- read them as row 9 and row 10 and opened a frame. A finger aimed
+    // at a button and landing two millimetres low must not open another screen,
+    // and there is nothing under the body to hit but this bar, so it takes the
+    // lot. `y > bottom`, not `>=`: the SURVEY view's START button ends exactly
+    // ON bottom (surveyButtonBox) and that pixel row is still the button's.
+    // And `y < screenH`, so that this bar and Theme::hitTestButtonBar agree
+    // about the pixels past the last one as well as about the last one.
+    if (y > bottom && y < screenH) {
         int which = -1;
         for (int i = 0; i < 3; i++) if (x >= b.x[i] && x <= b.x[i] + b.w) which = i;
         if (which < 0) return LoraTap::NONE;
@@ -2216,9 +2326,11 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
 
     // ---- the channel list: a tap reads the channel
     if (s_view == LoraView::CHANS) {
-        const int listTop = chansListTop(t);
+        const int listTop = chansListTop(t), listBottom = chansListBottom(t, bottom);
         if (y < listTop) return LoraTap::NONE;
-        const int row = s_scroll[(int)LoraView::CHANS] + (y - listTop) / rh;
+        const int vrow = (y - listTop) / rh;
+        if (vrow >= (listBottom - listTop) / rh) return LoraTap::NONE;   // past the last drawn row
+        const int row = s_scroll[(int)LoraView::CHANS] + vrow;
         Lora::ChannelRow r;
         if (row < 0 || !Lora::channelRow((uint8_t)row, r)) return LoraTap::NONE;
         Lora::Proto p; uint8_t idx;
@@ -2231,7 +2343,12 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
     // ---- the frame list: a tap opens the frame
     if (s_view == LoraView::LIST) {
         const int vrow = (y - top) / rh;
-        if (vrow < 0) return LoraTap::NONE;
+        // Only the rows that are on the glass. drawList stops as soon as a
+        // whole row no longer fits (y + rh <= bottom), so the last few pixels
+        // of the body are under the END of the list, not under a row -- and
+        // without this they opened the frame that did not fit, which is a
+        // frame the list never showed.
+        if (vrow < 0 || vrow >= (bottom - top) / rh) return LoraTap::NONE;
         if (s_adverts) {
             // The filter's rows are ring positions found at s_advAt frames, and
             // PACKET tracks its frame by exactly that pair.

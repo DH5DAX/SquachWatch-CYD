@@ -4841,6 +4841,13 @@ void loop() {
             static int  gestureStartX = 0, gestureStartY = 0;
             static int  lastY = -1;
             static uint32_t gestureDownMs = 0;
+            // The CLR arm, below. A separate flag rather than "is the deadline
+            // in the future", because millis() passes 2^31 after 24.8 days and
+            // a signed compare against a zero deadline would read as armed
+            // there; the unsigned difference below is wrap-safe on its own.
+            static bool     clrArmed   = false;
+            static uint32_t clrArmedAt = 0;
+            constexpr uint32_t CLR_CONFIRM_MS = 2500;
             if (touchJustDown) {
                 gestureActive = true;
                 gestureMoved  = false;
@@ -4853,6 +4860,8 @@ void loop() {
                 int dy = tp.y - lastY;
                 if (abs(dy) > 10) {
                     gestureMoved = true;
+                    // Scrolling the list is not answering the question.
+                    clrArmed = false;
                     uiLogScroll(dy > 0 ? -1 : 1);
                     lastY = tp.y;
                 }
@@ -4861,14 +4870,55 @@ void loop() {
                 if (!gestureMoved && now - gestureDownMs <= TAP_MAX_MS) {
                     lastTouch = now;
                     ButtonId b = Theme::hitTestButtonBar(gestureStartX, gestureStartY, tft.width(), tft.height());
-                    if (b == ButtonId::SCAN) { enterClear(); }
+                    if (b == ButtonId::SCAN) { clrArmed = false; enterClear(); }
                     if (b == ButtonId::CLR)  {
-                        engine.clearLog();
-                        BlackBox::markCleared();   // or a restart brings it all back
-                        Squachy::trigger(Squachy::Event::LOG_CLEARED);
-                        enterClear();
+                        // CLR ASKS FIRST. This is the only control on the device
+                        // that destroys data on one tap, and it is in the third
+                        // slot of the bottom bar -- the same 122 x 26 logical
+                        // pixel rectangle (46 x 10 mm on the CrowPanel) that
+                        // says [ DESK ] and opens desk mode on the screen you
+                        // just came from. Nothing else about the two presses
+                        // differs; one of them is a navigation and one of them
+                        // takes the log away, and markCleared() writes a CLEAR
+                        // record that forEachDetection stops at, so the black
+                        // box does not give it back either.
+                        //
+                        // SETTINGS > RESET STATS raises a whole confirm panel to
+                        // zero the detection COUNTS. Erasing every entry is the
+                        // larger destruction and had nothing.
+                        //
+                        // Arm-and-confirm rather than a panel: the panel would
+                        // want its own geometry and hit test on a screen that
+                        // already has two (the row menu and MORE INFO), and the
+                        // cost of the answer is one more tap on the button the
+                        // finger is already on. The toast IS the prompt and its
+                        // lifetime IS the window, so the question disappears at
+                        // the same moment the answer stops counting.
+                        // ...and the arm dies with the visit. A static that
+                        // outlives the screen is how a press meant for one
+                        // screen lands on another -- the LORA screen's gesture
+                        // had exactly that shape -- so an arm from a previous
+                        // visit does not count, however recent. Signed
+                        // difference, not >=: a raw compare fails once millis()
+                        // wraps between entering the log and pressing (closed,
+                        // but wrong), and the comment above promised wrap-safe.
+                        if (clrArmed && (int32_t)(clrArmedAt - transitionStart) >= 0 &&
+                            (now - clrArmedAt) <= CLR_CONFIRM_MS) {
+                            clrArmed = false;
+                            engine.clearLog();
+                            BlackBox::markCleared();   // or a restart brings it all back
+                            Squachy::trigger(Squachy::Event::LOG_CLEARED);
+                            enterClear();
+                        } else {
+                            clrArmed   = true;
+                            clrArmedAt = now;
+                            // Inside Theme's toast buffers: 17 characters for the
+                            // head and 21 for the sub (src/theme.cpp).
+                            Theme::showToast("ERASE THE LOG?", "CLR again to erase",
+                                             Theme::RED, CLR_CONFIRM_MS);
+                        }
                     }
-                    if (b == ButtonId::LOG)  { enterClear(); }   // toggle off
+                    if (b == ButtonId::LOG)  { clrArmed = false; enterClear(); }   // toggle off
                 }
                 gestureActive = false;
             }
@@ -6287,6 +6337,21 @@ void loop() {
             static int  lastY = -1;
             static uint32_t gestureDownMs = 0;
             static bool holdFired = false;
+            // A press that began on ANOTHER screen is not a press on this one.
+            // The main screen's LORA pill opens this screen on touch DOWN (see
+            // the CLEAR case, where it has to be: it sits in the top band and a
+            // release there would cycle the background on the way), so the
+            // finger is still on the glass when this case first runs. Its
+            // release would then be delivered here -- at gestureStartX/Y, which
+            // is wherever the LAST gesture on this screen went down, a frame row
+            // as often as not -- or its travel read as a drag and scroll the
+            // list out from under it. Both happen only when a gesture was left
+            // open by leaving the screen mid-press (an alert firing under the
+            // finger does it), which is rare and is exactly why it would never
+            // be found by trying. Keyed off the entry timestamp, so it is one
+            // reset per visit and not one per frame.
+            static uint32_t gestureEntry = 0;
+            if (gestureEntry != transitionStart) { gestureEntry = transitionStart; gestureActive = false; }
             if (touchJustDown) {
                 gestureActive = true;
                 gestureMoved  = false;
