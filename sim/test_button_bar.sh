@@ -8,16 +8,21 @@
 #
 # THE TWO THINGS IT HOLDS.
 #
-# 1. THE BAR OWNS THE BOTTOM EDGE OF THE GLASS. Theme::computeButtonBar puts a
-#    20-pixel bar at screenH - h - 6, so on a 320x240 panel the buttons are
-#    drawn at y 214..234 with FIVE rows of bare screen underneath them and
-#    nothing ever drawn there. hitTestButtonBar used to answer NONE in that
-#    band. Five logical rows is 1.9 mm on the CrowPanel and 0.9 mm on the 2.8"
-#    CYD, off the bottom of a target that is 8.0 mm tall to begin with -- and on
-#    the CLEAR screen the band was not merely dead, it belonged to the
+# 1. THE BAR OWNS THE BOTTOM EDGE OF THE GLASS. Theme::computeButtonBar puts
+#    the bar at screenH - h - 6, so there are six rows of bare screen under the
+#    drawn buttons and nothing ever drawn there. hitTestButtonBar used to answer
+#    NONE in that band. Those rows are 1.9 mm on the CrowPanel and 0.9 mm on the
+#    2.8" CYD, off the bottom of a target that was 8.0 mm tall to begin with --
+#    and on the CLEAR screen the band was not merely dead, it belonged to the
 #    background-cycling edge zone, so a press aimed at [ DESK ] and landing a
 #    millimetre low changed the wallpaper instead. Same species as the LORA
 #    screen's reported bug (sim/test_lora_bar.sh), on every other screen.
+#
+#    The bar's height follows the glass now (Theme::buttonBarH): this binary is
+#    the 2.8" CYD build, 0.178 mm to the pixel, where a 20-row bar plus the six
+#    was 4.6 mm, so it is 34 rows here -- 40 touchable, 7.1 mm. The constants
+#    below are that geometry; the CrowPanel keeps 20 and test_lora_bar.sh
+#    still says 214.
 #
 # 2. [ CLR ] ASKS FIRST. It wipes the detection log, and it is the third slot of
 #    the same bar -- the same rectangle that says [ DESK ] and opens desk mode on
@@ -34,10 +39,11 @@ NVS="$(mktemp -d)"      # the primed store, never written to by a case
 RUN="$NVS.run"          # the copy each case actually runs against
 trap 'rm -rf "$NVS" "$RUN"' EXIT
 
-# 320x240 -- squachsim-live's own canvas. computeButtonBar(320,240): h=20,
-# y=214, margin 8, gap 8, so the slots are x 8..104, 112..208 and 216..312.
-BAR_TOP=214       # the first row the buttons are drawn in
-BAR_DRAWN=234     # the last one
+# 320x240 -- squachsim-live's own canvas. computeButtonBar(320,240) at the
+# 2.8"'s pitch: h=34, y=200, margin 8, gap 8, so the slots are x 8..104,
+# 112..208 and 216..312, drawn in rows 200..233 with 234..239 bare under them.
+BAR_TOP=200       # the first row the buttons are drawn in
+BAR_DRAWN=233     # the last one
 BOTTOM=239        # the last row of the screen: the band this test is about
 SCAN_X=56         # slot 0 centre
 LOG_X=160         # slot 1 centre
@@ -103,7 +109,7 @@ printf 'S 300\nD 160 222\nS 10\nU\nS 10\nQ\n' |
   SQUACHSIM_NVS="$NVS" ./squachsim-live >/dev/null 2>&1
 
 echo "the bar owns every row from its top edge to the bottom of the glass"
-for y in $BAR_TOP 220 228 $BAR_DRAWN 235 237 $BOTTOM; do
+for y in $BAR_TOP 210 220 $BAR_DRAWN 235 237 $BOTTOM; do
   want "a press at y=$y on [ LOG ] opens the log" LOG <<EOF
 $(tap $LOG_X $y)
 EOF
@@ -112,7 +118,7 @@ done
 echo "...and not one row above it"
 # bodyBottom territory. The main screen keeps it; what it does with it is its
 # own business, but it is not the bar.
-for y in 210 213; do
+for y in 196 199; do
   want "a press at y=$y is not the bar" CLEAR <<EOF
 $(tap $LOG_X $y)
 EOF

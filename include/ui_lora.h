@@ -74,7 +74,16 @@ enum class LoraView : uint8_t {
 // The views that need a subject chosen first (PACKET, CHANMSG) and the picker
 // itself open on LIST instead.
 void uiLoraInit(TFT_eSPI& t, LoraView v = LoraView::LIST);
-void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool advance = true);
+// Draws the screen and says whether it did. The ten views are static text that
+// changes a few times a minute, and the frame they were drawn into is kept
+// from one loop() to the next, so a tick whose inputs are what they were at
+// the last draw -- the view, the scrolls, the counters, a toast, the clock's
+// second -- leaves the frame alone and returns false, and main.cpp then skips
+// the push (ui_lora.cpp's sceneSig says exactly what counts as an input).
+// uiLoraDirty() forces the next tick to draw regardless: a finger on the
+// glass, and the transition glitch, which paints over the frame.
+bool uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool advance = true);
+void uiLoraDirty();
 void uiLoraScroll(int delta);                // positive = down
 // How far a finger must travel for one row of scroll: the height of a row in
 // whichever view is showing. main.cpp's drag compared against a flat 10 px,

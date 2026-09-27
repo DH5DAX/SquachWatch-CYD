@@ -107,6 +107,8 @@ goes to stderr, so it can never corrupt the frame stream):
 | `S [n]` | step `n` `loop()` iterations (default 1), then emit a frame |
 | `T <type> [rssi]` | inject a synthetic detection (`T 6` or `T AIRTAG`) |
 | `R` | report the current `AppState` on stderr |
+| `C` | `PUSHES <n>` on stdout: how many frames have been pushed so far -- the panel's push count on the board |
+| `L [view]` | open the LORA screen on `LoraView` N, as `enterLora()` would. The board's doors to it are CrowPanel-only and this binary is the CYD build |
 | `Q` | quit |
 
 Each frame is `FRM <w> <h> <bytes> <state>\n` followed by `<bytes>` of
@@ -152,6 +154,8 @@ colorcheck boot lora`
 | Option | Effect |
 | --- | --- |
 | `--portrait` | render 240x320 instead of 320x240 |
+| `--size WxH` | render at another panel size, e.g. `400x240` for the CrowPanel |
+| `--pitch N` | one pixel of glass in micrometres (2.8" 178, 2.4" 152, CrowPanel 381): the button bar is sized from it, as on the board (`SQW_PIXEL_PITCH_UM` in each `include/*_user_setup.h`). Defaults to the board with that `--size`; the 2.4" shares the 2.8"'s 240x320 and needs it said |
 | `--bg N` | background style 0..9 (see `Settings::Background`) |
 | `--theme N` | palette index |
 | `--frames N` | animation warm-up frames before capture (default 90) |

@@ -18,6 +18,14 @@
 //               type name for that type's first profile ("T AIRTAG")
 //   Y           every profile: one "DETS <json>" line on stdout
 //   R           report current AppState on stderr
+//   C           "PUSHES <n>" on stdout: sprite pushes so far (TFT_eSprite::pushes),
+//               the panel's push count on the board -- for measuring what a
+//               screen costs while nothing on it moves
+//   L [view]    open the LORA screen on LoraView <view> (0 LIST .. 9 PICK) the
+//               way enterLora() does. A harness door, not a touch: the doors
+//               on the board (the CLEAR pill, the SYSTEM page's rows) are
+//               compiled for the CrowPanel only, and this binary is the CYD
+//               build -- so on this build the screen is reachable no other way
 //   P <cmd>     the virtual SquachMesh peer -- see meshsim.h for <cmd>.
 //               (P for peer: M was already touch-move.)
 //   K           the peer's pickers: one "CAT <json>" line on stdout
@@ -37,6 +45,8 @@
 
 #include <TFT_eSPI.h>
 #include "state.h"
+#include "theme.h"
+#include "ui_lora.h"
 #include "detection.h"
 #include "sim_touch.h"
 #include "sim_detections.h"
@@ -49,6 +59,10 @@ extern TFT_eSPI tft;
 extern AppState state;
 extern uint8_t  screenRotation;
 extern DetectionEngine engine;
+// For the L command: what enterLora() in main.cpp touches, minus one static
+// flag (s_loraFromClear, which only decides where BACK goes).
+extern TFT_eSPI* canvas;
+extern uint32_t  transitionStart;
 
 // pollTouch()'s XPT2046 defaults. These are `static` inside main.cpp so
 // they can't be read from here -- but the sim's Preferences shim starts
@@ -186,6 +200,14 @@ int main() {
     SimClock::virtualTime = true;
     // SQUACHSIM_ROTATE=1: rotation really turns the screen (see the shim).
     TFT_eSPI::rotates = getenv("SQUACHSIM_ROTATE") != nullptr;
+    // This binary IS the 2.8" CYD build (the Makefile -includes its user
+    // setup), so the glass is that header's own figure -- the shared UI
+    // objects it links against were built without one. SQUACHSIM_PITCH=<um>
+    // stands in another board's glass, the 2.4"'s 152 say, to look at its
+    // bar without a second build.
+    int pitchUm = SQW_PIXEL_PITCH_UM;
+    if (const char* e = getenv("SQUACHSIM_PITCH")) pitchUm = atoi(e);
+    Theme::setPixelPitchUm(pitchUm);
     setup();
 
     char line[128];
@@ -237,6 +259,15 @@ int main() {
             fflush(stdout);
         } else if (cmd == 'R') {
             fprintf(stderr, "[state] %s\n", stateName(state));
+        } else if (cmd == 'C') {
+            printf("PUSHES %u\n", (unsigned)TFT_eSprite::pushes);
+            fflush(stdout);
+        } else if (cmd == 'L') {
+            int v = 0;
+            sscanf(line + 1, "%d", &v);
+            state = AppState::LORA;
+            transitionStart = millis();
+            uiLoraInit(*canvas, (LoraView)v);
         } else if (cmd == 'S') {
             int n = 1;
             sscanf(line + 1, "%d", &n);

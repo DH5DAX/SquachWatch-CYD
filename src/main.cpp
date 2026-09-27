@@ -3412,6 +3412,19 @@ static uint32_t s_pushUsAvg  = 0;
 static uint32_t s_frameUsAvg = 0;
 static uint32_t s_loopsSinceSay = 0;
 static uint32_t s_pushAccumUs = 0;   // summed within a frame: cyd35 pushes twice
+// The repaint gate. A screen whose tick drew nothing this loop() sets
+// s_skipPush and the frame is not pushed: the sprite still holds the last
+// picture, and the panel still shows it. Only the LORA screen says so today
+// (uiLoraTick returns whether it drew, ui_lora.h); every other screen has a
+// mascot, a wallpaper or a scrolling list on it and keeps the full rate.
+// Measured in squachsim-live on the LORA frame list with the fake radio
+// quiet: 30 pushes a second before, 1 a second after (the screen's own 1 Hz
+// safety net), a finger on the glass back at the loop rate.
+// s_glitchedFrame remembers that the transition glitch painted over the
+// sprite on the last push, so the next tick redraws rather than skipping
+// over a picture the glitch has shifted.
+static bool s_skipPush      = false;
+static bool s_glitchedFrame = false;
 #if defined(CYD35)
 static uint32_t s_bandUs[2] = {0, 0};      // measurement: the 3.5"'s two draw passes
 #endif
@@ -3520,6 +3533,7 @@ void loop() {
     s_loopsSinceSay++;   // the real loop rate, pacing delays included; on the [frame] line
     FrameProf::begin();
     s_pushAccumUs = 0;
+    s_skipPush    = false;
     FramePush::newFrame();
     uint32_t now = millis();
 #if defined(TWATCH_S3)
@@ -4122,24 +4136,32 @@ void loop() {
             uiClearTick(*canvas, now, engine, true, s_scanPickerOpen);
 #endif
             FrameProf::lap(FrameProf::CHROME);
-            // Toasts on the main screen too. They were only drawn on LOG and
-            // NEARBY, so SNOOZED and READ, both raised on the way here or while
-            // here, went unseen.
-            Theme::drawToast(*canvas, now);
             // The clock is set and no zone was ever picked: the card, over
             // everything, until THIS IS RIGHT. A tap on it is the card's; a
             // tap beside it is the main screen's, so he can still be poked.
-            if (uiZoneCardWanted()) {
-                uiZoneCardDraw(*canvas, now);
-                if (touchJustDown && (now - lastTouch) > TOUCH_DEBOUNCE_MS) {
-                    const ZoneHit zh = uiZoneCardHit(tp.x, tp.y, tft.width(), tft.height());
-                    if (zh != ZoneHit::NONE) {
-                        lastTouch = now;
-                        if      (zh == ZoneHit::PREV) Settings::stepTimeZone(-1);
-                        else if (zh == ZoneHit::NEXT) Settings::stepTimeZone(1);
-                        else if (zh == ZoneHit::OK)   Settings::markTimeZoneChosen();
-                        break;
-                    }
+            const bool zoneCard = uiZoneCardWanted();
+            if (zoneCard) uiZoneCardDraw(*canvas, now);
+            // Toasts on the main screen too. They were only drawn on LOG and
+            // NEARBY, so SNOOZED and READ, both raised on the way here or while
+            // here, went unseen -- and then they were drawn UNDER the zone
+            // card, which fills the middle of the screen, exactly where a toast
+            // goes, for as long as the clock is trusted and no zone has been
+            // picked. On the emulator that is every boot until somebody presses
+            // THIS IS RIGHT, so a toast on CLEAR was never once seen there and
+            // the bench read that as "toasts never show on CLEAR"
+            // (sim/test_clear_toast.sh pins both cases now). A toast is a 1.5 s
+            // answer to something the owner just did; the card can wait under
+            // it. After the card, before its tap handling, so the frame that
+            // takes a tap on the card still has the toast on it.
+            Theme::drawToast(*canvas, now);
+            if (zoneCard && touchJustDown && (now - lastTouch) > TOUCH_DEBOUNCE_MS) {
+                const ZoneHit zh = uiZoneCardHit(tp.x, tp.y, tft.width(), tft.height());
+                if (zh != ZoneHit::NONE) {
+                    lastTouch = now;
+                    if      (zh == ZoneHit::PREV) Settings::stepTimeZone(-1);
+                    else if (zh == ZoneHit::NEXT) Settings::stepTimeZone(1);
+                    else if (zh == ZoneHit::OK)   Settings::markTimeZoneChosen();
+                    break;
                 }
             }
 #if CROWD_BENCH
@@ -4912,8 +4934,8 @@ void loop() {
                         } else {
                             clrArmed   = true;
                             clrArmedAt = now;
-                            // Inside Theme's toast buffers: 17 characters for the
-                            // head and 21 for the sub (src/theme.cpp).
+                            // Well inside Theme's toast buffers (24 and 48,
+                            // src/theme.cpp): one line each on every panel.
                             Theme::showToast("ERASE THE LOG?", "CLR again to erase",
                                              Theme::RED, CLR_CONFIRM_MS);
                         }
@@ -6327,7 +6349,19 @@ void loop() {
             break;
         }
         case AppState::LORA: {
-            drawTwoBand([&](TFT_eSPI& t, bool advance) { uiLoraTick(t, now, engine, advance); });
+            // The ten views are static text. uiLoraTick draws only when
+            // something it shows has changed and says whether it did, and the
+            // push at the end of loop() is skipped when it did not (see
+            // s_skipPush). Three things force a draw regardless: a finger on
+            // the glass -- so a tap is reflected in the frame after it, the
+            // frame it always was -- the transition glitch, which paints over
+            // the sprite for TRANSITION_MS after entry, and the frame after
+            // that one, which still holds the glitched picture.
+            if (tp.valid || touchJustUp || (now - transitionStart) < TRANSITION_MS || s_glitchedFrame)
+                uiLoraDirty();
+            bool drew = false;
+            drawTwoBand([&](TFT_eSPI& t, bool advance) { drew = uiLoraTick(t, now, engine, advance) || drew; });
+            s_skipPush = !drew;
             // Drag to scroll, tap for the rows and the bar: the settings
             // screen's gesture, with trackers of its own like every other
             // list screen keeps.
@@ -6558,10 +6592,16 @@ void loop() {
     // straight at tft and every draw this frame already landed on the
     // real screen -- pushing `frame` here would just paint stale data
     // from the sprite we stopped using back over the top of it.
-    if (frameBufferOk) {
-        if (now - transitionStart < TRANSITION_MS) {
+    // ...and not at all when the screen's tick drew nothing (s_skipPush): the
+    // sprite and the panel both still hold the last picture. A glitch cannot
+    // be running on a skipped frame -- the LORA case forces a draw while it
+    // is -- so s_glitchedFrame is only ever written here.
+    if (frameBufferOk && !s_skipPush) {
+        const bool glitch = now - transitionStart < TRANSITION_MS;
+        if (glitch) {
             Theme::drawTransitionGlitch(frame, now - transitionStart, TRANSITION_MS);
         }
+        s_glitchedFrame = glitch;
         FrameProf::lap(FrameProf::POST);
         pushFrame(0, 0);
         FrameProf::lap(FrameProf::PUSH);

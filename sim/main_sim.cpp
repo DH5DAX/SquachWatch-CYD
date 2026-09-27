@@ -283,6 +283,8 @@ static void usage() {
         "                    --frames skips that many 66 ms frames, --sequence films\n"
         "  --portrait        render 240x320 instead of 320x240\n"
         "  --size WxH        render at another panel size, e.g. 480x320 for the 3.5in\n"
+        "  --pitch N         one pixel of glass in micrometres (2.8in 178, 2.4in 152, CrowPanel 381);\n"
+        "                    the button bar is sized from it. Default: the board with that --size\n"
         "  --qwerty          phone screen: the QWERTY board, not the keypad\n"
         "  --msgs            messages on, with a phrase set\n"
         "  --inbox N         ...and canned line N just arrived from the visitor\n"
@@ -342,6 +344,7 @@ int main(int argc, char** argv) {
     bool msgs = false;
     int inboxLine = -1, phraseMode = -1;
     std::string sizeArg;   // --size WxH: render at another panel size
+    int pitchUm = 0;       // --pitch N: one pixel of glass in micrometres (else from the size)
     int confirmRow = -1;   // settings screen: put a confirm panel up
     int scrollBy = 0;      // settings screen: scroll down N rows first
     int bg = -1, themeIdx = -1, frames = 90, sequence = 1, outfitIdx = -1, poseIdx = -1, petIdx = -1;
@@ -435,6 +438,7 @@ int main(int argc, char** argv) {
             else fprintf(stderr, "--tap wants frame:x:y" "\n");
         }
         else if (a == "--size" && i + 1 < argc) sizeArg = argv[++i];
+        else if (a == "--pitch" && i + 1 < argc) pitchUm = atoi(argv[++i]);
     }
     if (sequence < 1) sequence = 1;
 
@@ -449,6 +453,21 @@ int main(int argc, char** argv) {
         if (sscanf(sizeArg.c_str(), "%dx%d", &sw, &sh) == 2 && sw > 63 && sh > 63) { W = sw; H = sh; }
         else { fprintf(stderr, "--size wants WxH, e.g. 480x320" "\n"); return 2; }
     }
+
+    // Which GLASS the size stands in for. The firmware reads its pixel pitch
+    // from the board's own header (SQW_PIXEL_PITCH_UM); this binary has no
+    // board, so it picks the one with that many pixels and --pitch says
+    // otherwise -- the 2.4" is 240x320 like the 2.8" and wants --pitch 152.
+    // The figures mirror include/*_user_setup.h; that is where they live.
+    if (!pitchUm) {
+        const int a = W < H ? W : H, b = W < H ? H : W;
+        if      (a == 240 && b == 400) pitchUm = 381;   // CrowPanel 7, 400x240 logical
+        else if (a == 480 && b == 800) pitchUm = 191;   // CrowPanel 7 native
+        else if (a == 320 && b == 480) pitchUm = 153;   // 3.5"
+        else if (a == 240 && b == 240) pitchUm = 116;   // T-Watch S3
+        else                           pitchUm = 178;   // 240x320: the 2.8" CYD
+    }
+    Theme::setPixelPitchUm(pitchUm);
 
     TFT_eSPI tft(W, H);
     tft.init();

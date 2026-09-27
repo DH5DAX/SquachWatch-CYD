@@ -1852,13 +1852,25 @@ void drawPick(TFT_eSPI& t, int w, int top, int bottom) {
 
 // ---- STATS -----------------------------------------------------------------
 
+// The room a stat line's text has after its label, in glyphs of the built-in
+// font at size 1: the label starts at x 6, the text 6 past its end, and the
+// text runs to 6 short of the right edge. "HEARD:" is six glyphs, so on the
+// 400 px canvas that is (400 - 6 - 36 - 6 - 6) / 6 = 57 glyphs.
+int statRoom(TFT_eSPI& t, int w, const char* label) {
+    return UiFit::chars(w - 6 - t.textWidth(label) - 6 - 6, 1);
+}
+
 int statLine(TFT_eSPI& t, int y, uint16_t col, const char* label, const char* text) {
     t.setTextColor(col, Theme::BG);
     t.setCursor(6, y);
     t.print(label);
     t.setTextColor(Theme::WHITE, Theme::BG);
     t.setCursor(6 + t.textWidth(label) + 6, y);
-    t.print(text);
+    // Wrap is off on this screen, so a line that does not fit would print
+    // through the right edge; one that does not is fitted with the mark.
+    char fit[96];
+    UiFit::fitHead(fit, sizeof fit, text, statRoom(t, t.width(), label));
+    t.print(fit);
     return y + t.fontHeight() + 2;
 }
 
@@ -1910,8 +1922,18 @@ void drawStats(TFT_eSPI& t, uint32_t now, int w, int top, int bottom) {
     }
     Lora::statusLine(b, sizeof b);
     y = statLine(t, y, Theme::CYAN, "RADIO:", b);
+    // The long words while they fit, the short ones when they do not: the long
+    // form is 45 glyphs of words plus the digits, so four four-digit counters
+    // already make 61 against the 57 the 400 px canvas leaves after "HEARD:"
+    // (statRoom) -- the short form is what a receiver that has run a day
+    // shows -- and it is the words that give, never the numbers. The short form
+    // is 51 with six digits each and 63 with nine, at which point statLine's
+    // mark takes over.
     snprintf(b, sizeof b, "%lu frames, %lu crc err, %lu hdr err, %lu stray preambles",
              (unsigned long)s.packets, (unsigned long)s.crcErrors, (unsigned long)s.headerErrors, (unsigned long)s.preambles);
+    if ((int)strlen(b) > statRoom(t, w, "HEARD:"))
+        snprintf(b, sizeof b, "%lu frames, %lu crc, %lu hdr, %lu stray",
+                 (unsigned long)s.packets, (unsigned long)s.crcErrors, (unsigned long)s.headerErrors, (unsigned long)s.preambles);
     y = statLine(t, y, Theme::CYAN, "HEARD:", b);
     snprintf(b, sizeof b, "%lu rounds, %lu hits", (unsigned long)s.cadRounds, (unsigned long)s.cadHits);
     y = statLine(t, y, Theme::CYAN, "CAD:", b);
@@ -2006,10 +2028,62 @@ void openView(LoraView v, bool adverts, bool msgAll) {
     s_view = v;
 }
 
+// ---- the redraw gate ---------------------------------------------------------
+//
+// Measured before this existed, in squachsim-live on the frame list with the
+// fake radio quiet: 30 pushes a second, one per loop(), of a picture that had
+// not changed -- and on the CrowPanel each of those is a 96 KB hash of the
+// sprite and, every 64th, 768,000 bytes into the framebuffer. The frame is
+// kept between loops on every board that draws through a sprite, so a tick
+// that has nothing new to say can leave it alone.
+//
+// sceneSig is a number that changes whenever the picture would: every piece
+// of this file's own state a tap can move, every counter a view prints, the
+// toast (up, and gone again), and the clock's second -- which is what redraws
+// the ages ("12 s ago"), the survey's running span, the TRAFFIC graph and the
+// sweep at 1 Hz, and is the safety net for anything this list has missed:
+// a stale input costs one second, never a stuck screen. What it does NOT
+// include is a finger: main.cpp calls uiLoraDirty() on any touch, so a tap is
+// reflected in the frame after it exactly as it was.
+uint32_t s_drawnSig  = 0;
+bool     s_forceDraw = true;    // the frame holds another screen's picture until the first draw
+bool     s_lastDrew  = false;   // for the second band of a two-band draw (drawTwoBand)
+
+uint32_t sceneSig(uint32_t now) {
+    uint32_t h = 2166136261u;
+    auto mix = [&](uint32_t v) { h ^= v; h *= 16777619u; };
+    mix((uint32_t)s_view); mix((uint32_t)s_under); mix(s_adverts); mix(s_msgAll);
+    mix((uint32_t)s_msgProto); mix(s_msgChan);
+    for (int i = 0; i < (int)LoraView::COUNT; i++) mix((uint32_t)s_scroll[i]);
+    mix(s_open); mix(s_openTotal);
+    mix((uint32_t)(int32_t)s_cmpA); mix((uint32_t)(int32_t)s_cmpB); mix((uint32_t)(int32_t)s_delRun);
+    mix(s_liveN);
+    mix(Lora::present()); mix((uint32_t)Lora::mode()); mix(Lora::currentProfile());
+    mix(Lora::packetTotal()); mix(Lora::nodeCount()); mix(Lora::channelRowCount());
+    mix(Lora::channelsQuietBuiltIn()); mix(Lora::msgCount()); mix(Lora::msgDropped());
+    mix(Lora::surveyRunCount()); mix((uint32_t)(int32_t)Lora::surveyRecording()); mix(Lora::spectrumSweeps());
+    const Lora::Stats& st = Lora::stats();
+    mix(st.crcErrors); mix(st.headerErrors); mix(st.preambles); mix(st.cadRounds); mix(st.cadHits);
+    mix((uint32_t)(int32_t)st.noiseDbm);
+    {
+        Lora::Enrich::Progress pr;
+        Lora::Enrich::progress(pr, now);
+        mix(pr.queued); mix(pr.sent); mix(pr.hit); mix(pr.miss); mix(pr.noAnswer);
+    }
+    mix(Settings::loraLookups()); mix(Settings::loraLookupCall()); mix(Settings::loraLookupOgn());
+    mix(Settings::loraLookupFeed()); mix(Lora::Feed::rowCount()); mix(Lora::Feed::polls());
+    mix(Theme::toastUp(now));
+    mix(now / 1000);
+    return h;
 }
+
+}  // namespace
+
+void uiLoraDirty() { s_forceDraw = true; }
 
 void uiLoraInit(TFT_eSPI& t, LoraView v) {
     t.fillRect(0, 0, t.width(), t.height(), Theme::BG);
+    s_forceDraw = true;
     // PACKET needs a frame chosen first, CHANMSG a channel, and the picker
     // something to cover.
     s_view = (v == LoraView::PACKET || v == LoraView::CHANMSG || v == LoraView::PICK || v >= LoraView::COUNT)
@@ -2043,13 +2117,13 @@ int uiLoraDragStep(TFT_eSPI& t) {
     return s_view == LoraView::SURVEY ? SURVEY_ROW : rowH(t);
 }
 
-void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool advance) {
-    (void)eng; (void)advance;
+bool uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool advance) {
+    (void)eng;
     const int w = t.width(), h = t.height();
     const int bottom = bodyBottom(w, h);
-    t.fillRect(0, BODY_TOP, w, bottom - BODY_TOP, Theme::BG);
-    // Every view, not just TRAFFIC: a monitor that only counts while it is the
-    // one showing opens with an empty graph every time.
+    // The bookkeeping runs every tick, drawn or not. Every view, not just
+    // TRAFFIC: a monitor that only counts while it is the one showing opens
+    // with an empty graph every time.
     trafficTick(now);
     // Likewise the survey's live rows. It costs a walk of the node table per
     // frame RECEIVED (liveSync gates on packetTotal, not on the redraw), and it
@@ -2058,6 +2132,18 @@ void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adva
     // already on it rather than filling in on the next frame off the air --
     // which on a quiet band is a minute of blank screen.
     if (Lora::present()) liveSync();
+    // The gate (see sceneSig). Only the first band of a two-band draw asks it;
+    // the second band draws whatever the first did, or it would half-skip.
+    if (advance) {
+        const uint32_t sig = sceneSig(now);
+        s_lastDrew = s_forceDraw || sig != s_drawnSig;
+        if (!s_lastDrew) return false;
+        s_forceDraw = false;
+        s_drawnSig  = sig;
+    } else if (!s_lastDrew) {
+        return false;
+    }
+    t.fillRect(0, BODY_TOP, w, bottom - BODY_TOP, Theme::BG);
     char title[48];
     switch (s_view) {
         case LoraView::LIST:
@@ -2097,6 +2183,7 @@ void uiLoraTick(TFT_eSPI& t, uint32_t now, const DetectionEngine& eng, bool adva
     // them. ui_rawscan.cpp draws its confirm panel last for the same reason.
     drawDelPanel(t, w, h, now);
     Theme::drawToast(t, now);
+    return true;
 }
 
 bool uiLoraHold(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
@@ -2141,9 +2228,10 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
                 const bool rec = Lora::surveyRecording() == run;
                 if (Lora::surveyDropRun((uint8_t)run)) {
                     delForgetPair(run);
-                    // Every head and sub on this screen is inside Theme's toast
-                    // buffers -- 17 characters and 21, cut with no ellipsis past
-                    // that (src/theme.cpp's s_toastHead/s_toastSub).
+                    // The subs on this screen run to 43 characters ("walk,
+                    // then STOP. LORA SURVEY LABEL names it"); Theme's toast
+                    // holds 47 and word-wraps what a narrow panel cannot fit
+                    // on one line (src/theme.cpp's drawToast).
                     Theme::showToast(rec ? "RUN ABORTED" : "RUN DELETED",
                                      "run numbers unchanged", Theme::CYAN);
                 } else {
@@ -2212,10 +2300,9 @@ LoraTap uiLoraTap(TFT_eSPI& t, int x, int y, int screenW, int screenH) {
             if (idx + 1 >= Lora::packetCount()) {
                 // Nothing older is held. Said out loud, because a button that
                 // does nothing when pressed is the same complaint in a smaller
-                // size. Both strings are inside Theme's toast buffers -- 17
-                // characters for the head and 21 for the sub (src/theme.cpp's
-                // s_toastHead/s_toastSub), and anything longer is cut with no
-                // ellipsis to show it was.
+                // size. Both strings are short of Theme's toast buffers (24
+                // and 48, src/theme.cpp), and anything longer is marked '>'
+                // or wrapped there, never cut in silence.
                 Theme::showToast("OLDEST FRAME", "BACK for the list", Theme::AMBER);
                 return LoraTap::HANDLED;
             }
